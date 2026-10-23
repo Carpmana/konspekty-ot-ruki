@@ -11,6 +11,7 @@ import sys
 import traceback
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QSettings, QSizeF, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPixmap,
@@ -18,13 +19,13 @@ from PySide6.QtGui import (
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout,
-    QWidget,
+    QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import service as sv
-from .profile import Profile
+from .profile import GlyphSample, Profile
 from .template import TEMPLATE_SETS, save_template_pdf
 
 APP_NAME = "Конспекты от руки"
@@ -72,6 +73,9 @@ QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: #ffffff; border: 2px solid {ACCENT}; width: 14px; height: 14px;
                               margin: -6px 0; border-radius: 8px; }}
 QRadioButton, QCheckBox {{ spacing: 8px; }}
+QToolButton#sample {{ background: #ffffff; border: 2px solid #d5d9e3; border-radius: 8px; padding: 4px; }}
+QToolButton#sample:checked {{ border-color: {ACCENT}; }}
+QToolButton#sample:!checked {{ background: #fbe9e9; border: 2px dashed #c0392b; }}
 QLabel#missing {{ background: #fff4c2; color: #5a4a00; padding: 8px 10px; border-radius: 8px; }}
 QStatusBar {{ background: #ffffff; border-top: 1px solid #e3e6ee; color: #6b7385; }}
 QSplitter::handle {{ background: transparent; }}
@@ -271,6 +275,105 @@ class ImportDialog(QDialog):
         self.accept()
 
 
+def sample_pixmap(prof: Profile, s: GlyphSample, height: int = 90) -> QPixmap:
+    a = prof.image(s)
+    gray = np.ascontiguousarray(255 - np.clip(a * 255, 0, 255).astype(np.uint8))
+    im = QImage(gray.data, gray.shape[1], gray.shape[0], gray.strides[0], QImage.Format_Grayscale8).copy()
+    return QPixmap.fromImage(im).scaledToHeight(height, Qt.SmoothTransformation)
+
+
+class SamplesDialog(QDialog):
+    """Все варианты одного символа. Щелчок по образцу отключает его (рамка
+    становится красной пунктирной) или возвращает обратно."""
+
+    def __init__(self, parent, prof: Profile, start: str = ""):
+        super().__init__(parent)
+        self.prof = prof
+        self.enabled = {s.id: s.enabled for s in prof.samples}
+        self.suspect = {s.id for s in prof.find_crossed()}
+        self.setWindowTitle(f"Образцы букв — {prof.name}")
+        self.resize(720, 520)
+        lay = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Символ:"))
+        self.text_box = QComboBox()
+        texts = sorted({s.text for s in prof.samples}, key=lambda t: (len(t), t.lower(), t))
+        for t in texts:
+            n = sum(1 for s in prof.samples if s.text == t)
+            self.text_box.addItem(f"{t}   ({n})", t)
+        row.addWidget(self.text_box, 1)
+        self.crossed_btn = QPushButton("Отключить похожие на зачёркнутые")
+        self.crossed_btn.clicked.connect(self._disable_suspects)
+        row.addWidget(self.crossed_btn)
+        lay.addLayout(row)
+        lay.addWidget(QLabel("Щёлкните по неудачному или зачёркнутому образцу, чтобы программа его не брала. "
+                             "Щёлкните ещё раз, чтобы вернуть.", objectName="hint", wordWrap=True))
+
+        self.grid_box = QWidget()
+        self.grid = QGridLayout(self.grid_box)
+        self.grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(self.grid_box)
+        lay.addWidget(area, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("Сохранить")
+        buttons.button(QDialogButtonBox.Cancel).setText("Отмена")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+        first_suspect = next((s.text for s in prof.samples if s.id in self.suspect), "")
+        i = self.text_box.findData(start or first_suspect)
+        self.text_box.setCurrentIndex(max(i, 0))
+        self.text_box.currentIndexChanged.connect(self._show)
+        self._show()
+
+    def buttons_for_current(self) -> list[QToolButton]:
+        return [self.grid.itemAt(i).widget() for i in range(self.grid.count())]
+
+    def _show(self, *_):
+        while self.grid.count():
+            old = self.grid.takeAt(0).widget()
+            old.setParent(None)
+            old.deleteLater()
+        text = self.text_box.currentData()
+        for k, s in enumerate(s for s in self.prof.samples if s.text == text):
+            b = QToolButton(objectName="sample")
+            b.setCheckable(True)
+            b.setChecked(self.enabled[s.id])
+            pm = sample_pixmap(self.prof, s)
+            b.setIcon(pm)
+            b.setIconSize(pm.size())
+            tip = s.source or ""
+            if s.id in self.suspect:
+                tip = "Похоже на зачёркнутый. " + tip
+            b.setToolTip(tip)
+            b.setProperty("sample_id", s.id)
+            b.toggled.connect(lambda on, sid=s.id: self.enabled.__setitem__(sid, on))
+            self.grid.addWidget(b, k // 5, k % 5)
+
+    def _disable_suspects(self):
+        for sid in self.suspect:
+            self.enabled[sid] = False
+        self._show()
+        n = len(self.suspect)
+        QMessageBox.information(self, APP_NAME, f"Отключено образцов: {n}. Нажмите «Сохранить»."
+                                if n else "Зачёркнутых образцов не найдено.")
+
+    def changed(self) -> int:
+        return sum(1 for s in self.prof.samples if s.enabled != self.enabled[s.id])
+
+    def _save(self):
+        for s in self.prof.samples:
+            s.enabled = self.enabled[s.id]
+        self.prof.measure()
+        self.prof.save()
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, profiles_dir: str | Path | None = None, settings: QSettings | None = None):
         super().__init__()
@@ -355,6 +458,10 @@ class MainWindow(QMainWindow):
         row.addWidget(imp, 1)
         row.addWidget(blank)
         sl.addLayout(row)
+        samples = QPushButton("Образцы букв…")
+        samples.setToolTip("Посмотреть варианты каждой буквы и отключить неудачные или зачёркнутые (Ctrl+B)")
+        samples.clicked.connect(self.edit_samples)
+        sl.addWidget(samples)
 
         section("Бумага")
         self.page_box = QComboBox()
@@ -544,6 +651,7 @@ class MainWindow(QMainWindow):
         act(m, "Сохранить основной бланк (PDF)…", lambda: self.save_template("main"))
         act(m, "Сохранить дополнительный бланк (PDF)…", lambda: self.save_template("extra"))
         act(m, "Что есть в профиле", self.show_coverage)
+        act(m, "Образцы букв…", self.edit_samples, "Ctrl+B")
         m.addSeparator()
         act(m, "Открыть папку профилей", self.open_profiles_dir)
         act(m, "Выбрать папку профилей…", self.choose_profiles_dir)
@@ -626,7 +734,26 @@ class MainWindow(QMainWindow):
                 self.profile = Profile.load(path)
             except Exception as e:
                 QMessageBox.warning(self, APP_NAME, f"Не удалось открыть профиль:\n{e}")
+        if self.profile is not None:
+            self._offer_crossed()
         self.refresh_preview()
+
+    def _offer_crossed(self):
+        """Спрашивает один раз про образцы, похожие на зачёркнутые."""
+        found = self.profile.find_crossed()
+        key = "crossed_answered/" + self.profile.name
+        ids = " ".join(sorted(s.id for s in found))
+        if not found or self.qs.value(key, "") == ids:
+            return
+        letters = " ".join(sorted({s.text for s in found}))
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"В почерке «{self.profile.name}» есть образцы, похожие на зачёркнутые: {letters}.\n\n"
+            "Отключить их, чтобы программа их не писала? Вернуть можно в «Образцы букв…».")
+        if answer == QMessageBox.Yes:
+            sv.disable_crossed(self.profile)
+        else:
+            self.qs.setValue(key, ids)
 
     def import_scans(self):
         dlg = ImportDialog(self, sv.list_profiles(self.profiles_dir), self.profile_box.currentText())
@@ -650,6 +777,13 @@ class MainWindow(QMainWindow):
         if not self._need_profile():
             return
         QMessageBox.information(self, "Что есть в профиле", sv.coverage_text(self.profile))
+
+    def edit_samples(self):
+        if not self._need_profile():
+            return
+        dlg = SamplesDialog(self, self.profile)
+        if dlg.exec() == QDialog.Accepted:
+            self.refresh_preview()
 
     def save_template(self, key: str = "main"):
         title = TEMPLATE_SETS[key].title
