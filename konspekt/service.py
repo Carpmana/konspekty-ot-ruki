@@ -238,6 +238,7 @@ class Options:
     offset_x_mm: float = 0.0  # подстройка под принтер (для печати на листок)
     offset_y_mm: float = 0.0
     spread: bool = False  # двойной листок целиком: две страницы рядом, с оборотом
+    nested: bool = True  # листки вкладываются друг в друга, как в тетради (иначе — стопкой)
 
     @property
     def fmt(self) -> PageFormat:
@@ -276,6 +277,7 @@ class Rendered:
     dpi: int
     size_mm: tuple[float, float] = (210.0, 297.0)
     labels: list[str] = field(default_factory=list)  # подписи сторон листков (для разворота)
+    blank: list[bool] = field(default_factory=list)  # сторона листка без текста: не печатается
 
     @property
     def is_spread(self) -> bool:
@@ -284,6 +286,14 @@ class Rendered:
     def side_indices(self, inner: bool) -> list[int]:
         """Стороны разворота: снаружи (чётные) или внутри (нечётные)."""
         return list(range(int(inner), len(self.images), 2))
+
+    def sheets(self) -> list[tuple[int, int | None]]:
+        """Двойные листки по порядку: (наружная сторона, внутренняя или None, если она пустая)."""
+        out = []
+        for k in range(0, len(self.images), 2):
+            inner = k + 1 if not (self.blank and self.blank[k + 1]) else None
+            out.append((k, inner))
+        return out
 
 
 def _mirror_page(page: lay.Page, dx: float) -> lay.Page:
@@ -332,29 +342,49 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
         im = render_page(page, prof, ps, i)
         images.append(_ink_only(im, opts, dpi) if ink_only else im)
     r = Rendered(images, set(layout.missing), dpi, f.size_mm)
-    return to_spreads(r) if opts.use_spread else r
+    return to_spreads(r, len(layout.pages), opts.nested) if opts.use_spread else r
 
 
-def to_spreads(r: Rendered) -> Rendered:
+def sheet_pages(sheets: int, nested: bool) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Номера страниц на сторонах каждого листка: ((снаружи слева, справа), (внутри слева, справа)).
+
+    Стопкой: листок 1 — страницы 1–4, листок 2 — 5–8… Тетрадкой (вложены друг
+    в друга): листок 1 самый внешний, на нём первые две и последние две страницы,
+    самый внутренний листок — середина конспекта."""
+    out = []
+    for i in range(sheets):
+        if nested:
+            last = 4 * sheets
+            out.append(((last - 2 * i, 2 * i + 1), (2 * i + 2, last - 2 * i - 1)))
+        else:
+            k = 4 * i
+            out.append(((k + 4, k + 1), (k + 2, k + 3)))
+    return out
+
+
+def to_spreads(r: Rendered, real: int | None = None, nested: bool = False) -> Rendered:
     """Страницы тетради → стороны развёрнутых двойных листков (две страницы рядом).
 
-    Двойной листок — страницы 1–4. Снаружи: слева 4, справа 1; внутри:
-    слева 2, справа 3. Сначала печатается наружная сторона, потом листок
-    переворачивают и печатают внутреннюю."""
+    У каждого листка сначала печатается наружная сторона, потом листок
+    переворачивают и печатают внутреннюю. real — сколько страниц с текстом;
+    сторона, где обе страницы пустые, помечается в blank и не печатается."""
     w, h = r.images[0].size
-    sides, labels = [], []
-    for k in range(0, len(r.images), 4):
-        p = r.images[k:k + 4]
-        n = k // 4 + 1
-        for left, right, where, nums in ((p[3], p[0], "снаружи", (k + 4, k + 1)),
-                                         (p[1], p[2], "внутри", (k + 2, k + 3))):
+    real = len(r.images) if real is None else real
+    sheets = len(r.images) // 4
+    sides, labels, blank = [], [], []
+    for i, (outer, inner) in enumerate(sheet_pages(sheets, nested)):
+        for nums, where in ((outer, "снаружи"), (inner, "внутри")):
             side = Image.new("RGB", (2 * w, h), (255, 255, 255))
-            side.paste(left, (0, 0))
-            side.paste(right, (w, 0))
+            side.paste(r.images[nums[0] - 1], (0, 0))
+            side.paste(r.images[nums[1] - 1], (w, 0))
             sides.append(side)
-            labels.append(f"Листок {n}, {where}: страницы {nums[0]} и {nums[1]}")
+            empty = min(nums) > real
+            shown = [str(x) if x <= real else "пусто" for x in nums]
+            labels.append(f"Листок {i + 1}, {where}: " + ("пусто, не печатается" if empty
+                                                          else f"слева {shown[0]}, справа {shown[1]}"))
+            blank.append(empty)
     W, H = r.size_mm
-    return Rendered(sides, r.missing, r.dpi, (2 * W, H), labels)
+    return Rendered(sides, r.missing, r.dpi, (2 * W, H), labels, blank)
 
 
 def export_pdf(text: str, prof: Profile, opts: Options, path: str | Path, dpi: int = EXPORT_DPI) -> Rendered:

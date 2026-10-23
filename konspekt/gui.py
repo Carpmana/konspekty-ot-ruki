@@ -740,6 +740,12 @@ class MainWindow(QMainWindow):
         self.spread_box.setToolTip("Развёрнутый двойной листок 340×205 мм вставляется в принтер узкой стороной. "
                                    "Сначала печатаются страницы 4 и 1, потом листок переворачивают — 2 и 3.")
         sl.addWidget(self.spread_box)
+        self.nested_box = QCheckBox("Листки вкладывать друг в друга\n(как тетрадь)")
+        self.nested_box.setToolTip("Включено: листок 1 внешний, в нём начало и конец конспекта, середина — "
+                                   "на самом внутреннем листке. Выключено: листки идут стопкой, "
+                                   "на листке 1 страницы 1–4, на листке 2 — 5–8.")
+        self.nested_box.setChecked(True)
+        sl.addWidget(self.nested_box)
         self.flip_back = QCheckBox("Оборот вверх ногами")
         self.flip_back.setToolTip("Включите, если на обороте текст вышел перевёрнутым: "
                                   "зависит от того, как принтер берёт листок.")
@@ -828,6 +834,7 @@ class MainWindow(QMainWindow):
         self.real_paper.toggled.connect(self._update_print_mode)
         self.spread_box.toggled.connect(self._update_print_mode)
         self.spread_box.toggled.connect(self.schedule_preview)
+        self.nested_box.toggled.connect(self.schedule_preview)
         self.page_box.currentIndexChanged.connect(self._update_print_mode)
         self._update_print_mode()
 
@@ -850,6 +857,7 @@ class MainWindow(QMainWindow):
         notebook = self.page_box.currentData() == "notebook"
         self.spread_box.setVisible(notebook)
         self.flip_back.setVisible(notebook and self.spread_box.isChecked())
+        self.nested_box.setVisible(notebook and self.spread_box.isChecked())
 
     def _build_menu(self):
         def act(menu, title, slot, shortcut=None):
@@ -903,6 +911,7 @@ class MainWindow(QMainWindow):
         self.off_y.setValue(float(q.value("offset_y_mm", 0.0)))
         self.spread_box.setChecked(q.value("spread", "false") in (True, "true"))
         self.flip_back.setChecked(q.value("flip_back", "false") in (True, "true"))
+        self.nested_box.setChecked(q.value("nested", "true") in (True, "true"))
         self._update_counter()
 
     def _save_settings(self):
@@ -916,6 +925,7 @@ class MainWindow(QMainWindow):
         q.setValue("offset_y_mm", self.off_y.value())
         q.setValue("spread", self.spread_box.isChecked())
         q.setValue("flip_back", self.flip_back.isChecked())
+        q.setValue("nested", self.nested_box.isChecked())
         q.setValue("seed", self.seed_spin.value())
         q.setValue("neatness10", self.neat_slider.value())
         q.setValue("size_mm", self.size_spin.value())
@@ -934,7 +944,8 @@ class MainWindow(QMainWindow):
                           size_mm=size if size > 0 else None, pitch_mm=self.pitch_spin.value(),
                           show_missing=self.show_missing.isChecked(), margins=self.margin_box.currentData(),
                           real_paper=self.real_paper.isChecked(), offset_x_mm=self.off_x.value(),
-                          offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked())
+                          offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
+                          nested=self.nested_box.isChecked())
 
     # ---------- профили ----------
 
@@ -1107,8 +1118,9 @@ class MainWindow(QMainWindow):
         n = len(r.images)
         if r.is_spread:
             k = n // 2
-            self.pages_label.setText(f"{k} {_plural(k, 'двойной листок', 'двойных листка', 'двойных листков')}: "
-                                     "сначала снаружи (стр. 4 и 1), потом внутри (стр. 2 и 3)")
+            how = ("вложить друг в друга, листок 1 снаружи" if self.nested_box.isChecked() and k > 1
+                   else "сложить стопкой по порядку" if k > 1 else "сначала наружная сторона, потом внутренняя")
+            self.pages_label.setText(f"{k} {_plural(k, 'двойной листок', 'двойных листка', 'двойных листков')}: {how}")
         else:
             self.pages_label.setText(f"{n} {_plural(n, 'страница', 'страницы', 'страниц')}")
         self.statusBar().clearMessage()
@@ -1155,24 +1167,42 @@ class MainWindow(QMainWindow):
             if self._paint_images(printer, r.images):
                 self.statusBar().showMessage(f"Отправлено на печать: {len(r.images)} стр.", 8000)
             return
-        # Двойной листок: сначала все наружные стороны, потом листки переворачивают.
-        outer = [r.images[i] for i in r.side_indices(inner=False)]
-        inner = [r.images[i] for i in r.side_indices(inner=True)]
-        if self.flip_back.isChecked():
-            inner = [im.rotate(180) for im in inner]
-        if not self._paint_images(printer, outer):
-            return
-        n = len(outer)
-        if ask_flip and QMessageBox.information(
-                self, "Печать на двойной листок",
-                f"Напечатана наружная сторона ({n} {_plural(n, 'листок', 'листка', 'листков')}: страницы 4 и 1).\n\n"
-                "Дайте чернилам высохнуть, переверните листки и вставьте их снова тем же краем вперёд, "
-                "в том же порядке. Затем нажмите OK — напечатается внутренняя сторона (страницы 2 и 3).",
-                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
-            return
-        if self._paint_images(printer, inner):
-            self.statusBar().showMessage(f"Отправлено на печать: {n} {_plural(n, 'листок', 'листка', 'листков')}"
-                                         " с двух сторон", 8000)
+        # Двойные листки печатаются по одному: снаружи, переворот, внутри, следующий листок.
+        sheets = r.sheets()
+        n = len(sheets)
+
+        def ask(title: str, text: str) -> bool:
+            return not ask_flip or QMessageBox.information(
+                self, title, text, QMessageBox.Ok | QMessageBox.Cancel) == QMessageBox.Ok
+
+        for i, (outer, inner) in enumerate(sheets):
+            head = f"Листок {i + 1} из {n}"
+            if i and not ask(head, f"Вставьте чистый двойной листок развёрнутым, как первый.\n\n"
+                                   f"Напечатается: {r.labels[outer]}.\n\n"
+                                   "Совет: подпишите карандашом в уголке номер листка — так их не перепутать."):
+                return
+            if not self._paint_images(printer, [r.images[outer]]):
+                return
+            if inner is None:
+                continue
+            im = r.images[inner].rotate(180) if self.flip_back.isChecked() else r.images[inner]
+            if not ask(head, f"Наружная сторона напечатана.\n\n"
+                             "Дайте чернилам высохнуть, переверните этот же листок чистой стороной "
+                             "и вставьте его снова тем же краем вперёд.\n\n"
+                             f"Напечатается: {r.labels[inner]}."):
+                return
+            if not self._paint_images(printer, [im]):
+                return
+        done = f"Готово: {n} {_plural(n, 'двойной листок', 'двойных листка', 'двойных листков')}."
+        if n > 1 and self.nested_box.isChecked():
+            done += ("\n\nСоберите тетрадь: листок 1 снаружи, в него вложите листок 2"
+                     + (", в него листок 3" if n > 2 else "")
+                     + (" и так далее" if n > 3 else "") + ". Сложите пополам — страницы пойдут по порядку.")
+        elif n > 1:
+            done += "\n\nСложите листки стопкой по номерам: листок 1 сверху."
+        self.statusBar().showMessage(done.split("\n")[0], 8000)
+        if ask_flip and n > 1:
+            QMessageBox.information(self, "Печать на двойной листок", done)
 
     def _paint_images(self, printer: QPrinter, images) -> bool:
         painter = QPainter()

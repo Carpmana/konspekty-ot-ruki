@@ -173,12 +173,35 @@ def test_double_sheet_spread(profile):
     assert r.size_mm == (340.0, 205.0)
     w, h = plain.images[0].size
     assert r.images[0].size == (2 * w, h)
-    assert "4 и 1" in r.labels[0] and "2 и 3" in r.labels[1]
+    assert "справа 1" in r.labels[0] and "пусто, не печатается" in r.labels[1]
+    assert r.sheets() == [(0, None)]  # одна страница: оборот не печатается
     assert r.side_indices(inner=False) == [0] and r.side_indices(inner=True) == [1]
     # текст стр. 1 — правая половина наружной стороны
     assert np.array_equal(np.asarray(r.images[0])[:, w:], np.asarray(plain.images[0]))
     # A4 разворот не делает
     assert not sv.render_text(TEXT, profile, sv.Options(page="A4", spread=True), dpi=40).is_spread
+
+
+def test_sheets_stacked_and_nested():
+    from PIL import Image
+
+    assert sv.sheet_pages(2, nested=False) == [((4, 1), (2, 3)), ((8, 5), (6, 7))]
+    # тетрадка: внешний листок — 1, 2 и 7, 8; внутренний — середина 3–6
+    assert sv.sheet_pages(2, nested=True) == [((8, 1), (2, 7)), ((6, 3), (4, 5))]
+    assert sv.sheet_pages(1, nested=True) == sv.sheet_pages(1, nested=False)
+    pages = [Image.new("RGB", (4, 6), (k * 20, 0, 0)) for k in range(1, 9)]
+    base = sv.Rendered(pages, set(), 40, (170.0, 205.0))
+
+    def halves(side):
+        return side.getpixel((0, 0))[0] // 20, side.getpixel((4, 0))[0] // 20
+
+    r = sv.to_spreads(base, real=5, nested=True)
+    assert [halves(im) for im in r.images] == [(8, 1), (2, 7), (6, 3), (4, 5)]
+    assert r.blank == [False] * 4 and r.sheets() == [(0, 1), (2, 3)]
+    assert "слева пусто, справа 1" in r.labels[0]
+    stack = sv.to_spreads(base, real=5, nested=False)
+    assert [halves(im) for im in stack.images] == [(4, 1), (2, 3), (8, 5), (6, 7)]
+    assert stack.sheets() == [(0, 1), (2, None)]  # страниц 6 и 7 нет — оборот листка 2 пустой
 
 
 def test_drawn_sample_is_saved_and_removed(profile, tmp_path):

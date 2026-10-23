@@ -198,6 +198,7 @@ def test_spread_option_only_for_notebook(app, window):
     window.spread_box.setChecked(True)
     assert window.options().use_spread
     assert not window.flip_back.isHidden()
+    assert not window.nested_box.isHidden() and window.options().nested
 
 
 def test_draw_dialog_save_and_delete(app, window, tmp_path):
