@@ -37,6 +37,7 @@ ASSETS = (Path(__file__).parent / "assets").as_posix()
 
 STYLE = f"""
 QMainWindow, QWidget#body {{ background: #f4f5f8; }}
+QDialog, QMessageBox {{ background: #ffffff; }}
 QWidget {{ font-size: 10pt; color: #1f2430; }}
 QFrame#header {{ background: #ffffff; border-bottom: 1px solid #e3e6ee; }}
 QLabel#title {{ font-size: 15pt; font-weight: 600; }}
@@ -1258,11 +1259,21 @@ class MainWindow(QMainWindow):
         self._start(Task(fn, *args, on_done=ok, on_fail=fail))
 
 
+def apply_light_theme(app: QApplication):
+    """Всегда светлое оформление: в тёмной теме Windows окна-вопросы были
+    тёмными с тёмным текстом и не читались."""
+    hints = app.styleHints()
+    if hasattr(hints, "setColorScheme"):
+        hints.setColorScheme(Qt.ColorScheme.Light)
+    app.setPalette(app.style().standardPalette())
+
+
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(QIcon(f"{ASSETS}/icon.png"))
     app.setStyle("Fusion")
+    apply_light_theme(app)
     if sys.platform == "win32":
         app.setFont(QFont("Segoe UI", 10))
         try:  # своя иконка на панели задач, а не значок Python

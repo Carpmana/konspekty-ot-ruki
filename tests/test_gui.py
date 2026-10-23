@@ -223,3 +223,14 @@ def test_draw_dialog_save_and_delete(app, window, tmp_path):
     assert len(dlg.strip_buttons()) == n
     assert len(Profile.load(root).variants("ж")) == n
     dlg.close()
+
+
+def test_light_theme_dialogs_readable(app, window):
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QMessageBox
+
+    gui.apply_light_theme(app)
+    box = QMessageBox(QMessageBox.Question, gui.APP_NAME, "Проверка", QMessageBox.Yes | QMessageBox.No, window)
+    pal = box.palette()
+    assert pal.color(QPalette.Window).lightness() > 200
+    assert pal.color(QPalette.WindowText).lightness() < 80
