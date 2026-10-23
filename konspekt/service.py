@@ -66,8 +66,11 @@ def default_profiles_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "profiles"
 
 
-def list_profiles(profiles_dir: str | Path) -> list[tuple[str, Path]]:
-    """(имя, папка) всех профилей в папке, по алфавиту."""
+def list_profiles(profiles_dir: str | Path, errors: list[str] | None = None) -> list[tuple[str, Path]]:
+    """(имя, папка) всех профилей в папке, по алфавиту.
+
+    Повреждённый профиль не мешает остальным; почему он не открылся,
+    дописывается в errors, чтобы окно могло это показать."""
     root = Path(profiles_dir)
     if not root.is_dir():
         return []
@@ -76,8 +79,9 @@ def list_profiles(profiles_dir: str | Path) -> list[tuple[str, Path]]:
         if (d / PROFILE_FILE).exists():
             try:
                 out.append((Profile.load(d).name, d))
-            except (ValueError, KeyError, OSError):
-                continue  # повреждённый профиль не мешает остальным
+            except Exception as e:
+                if errors is not None:
+                    errors.append(f"{d.name}: {type(e).__name__}: {e}")
     return sorted(out, key=lambda p: p[0].lower())
 
 

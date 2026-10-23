@@ -94,6 +94,18 @@ def test_no_profiles_shows_hint(app, tmp_path):
     w.close()
 
 
+def test_broken_profile_reason_is_shown(app, tmp_path):
+    bad = tmp_path / "profiles" / "Мой_почерк"
+    bad.mkdir(parents=True)
+    (bad / "profile.json").write_text('{"format": 99}', encoding="utf-8")
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(tmp_path / "profiles", qs)
+    assert w.profile is None
+    hint = w.pages._hint.text()
+    assert "не открылся" in hint and "Мой_почерк" in hint and "99" in hint
+    w.close()
+
+
 def test_print_is_real_size(app, window, profile, tmp_path):
     from PySide6.QtGui import QPageLayout, QPageSize
     from PySide6.QtPrintSupport import QPrinter

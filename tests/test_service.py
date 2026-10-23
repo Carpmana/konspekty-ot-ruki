@@ -18,6 +18,9 @@ def test_broken_profile_is_skipped(profile, tmp_path):
     bad.mkdir()
     (bad / "profile.json").write_text("{}", encoding="utf-8")
     assert sv.list_profiles(tmp_path) == []
+    errors = []
+    assert sv.list_profiles(tmp_path, errors) == []
+    assert len(errors) == 1 and errors[0].startswith("плохой:")
 
 
 def test_render_preview_and_export_same_pages(profile, tmp_path):

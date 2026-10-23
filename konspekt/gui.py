@@ -605,7 +605,8 @@ class MainWindow(QMainWindow):
     # ---------- профили ----------
 
     def reload_profiles(self, select: str | None = None):
-        profiles = sv.list_profiles(self.profiles_dir)
+        self.profile_errors = []
+        profiles = sv.list_profiles(self.profiles_dir, self.profile_errors)
         self.profile_box.blockSignals(True)
         self.profile_box.clear()
         for name, path in profiles:
@@ -623,7 +624,7 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 self.profile = Profile.load(path)
-            except (ValueError, KeyError, OSError) as e:
+            except Exception as e:
                 QMessageBox.warning(self, APP_NAME, f"Не удалось открыть профиль:\n{e}")
         self.refresh_preview()
 
@@ -705,8 +706,12 @@ class MainWindow(QMainWindow):
         text = self.text_edit.toPlainText()
         if self.profile is None:
             self.pages_label.clear()
-            self.pages.show_hint("Нет профиля почерка.\n\nПочерк → Сохранить основной бланк, заполните его ручкой, "
-                                 "отсканируйте и нажмите «Импорт сканов…».")
+            if getattr(self, "profile_errors", None):
+                self.pages.show_hint("Профиль почерка не открылся:\n\n" + "\n".join(self.profile_errors)
+                                     + f"\n\nПапка профилей: {self.profiles_dir}")
+            else:
+                self.pages.show_hint("Нет профиля почерка.\n\nПочерк → Сохранить основной бланк, заполните его ручкой, "
+                                     "отсканируйте и нажмите «Импорт сканов…».")
             self._set_missing(set())
             return
         if not text.strip():
