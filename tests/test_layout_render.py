@@ -72,3 +72,56 @@ def test_ink_is_drawn(profile):
     layout = typeset("проверка", profile, s)
     img = np.asarray(render_page(layout.pages[0], profile, s))
     assert (img[..., 2].astype(int) - img[..., 0] > 60).sum() > 50  # синие чернила есть
+
+
+def test_markup_marks_and_scripts():
+    from konspekt.layout import _deco_marks, script_marks
+
+    assert _deco_marks("_важно") == ("важно", {"under"}, set())
+    assert _deco_marks("слово_,") == ("слово,", set(), {"under"})
+    assert _deco_marks("[[_итог_]]") == ("итог", {"box", "under"}, {"box", "under"})
+    assert script_marks("x^2") == ("x2", ["", "sup"])
+    assert script_marks("H_2O") == ("H2O", ["", "sub", ""])
+    assert script_marks("a^{10}") == ("a10", ["", "sup", "sup"])
+    assert script_marks("слово") == ("слово", [""] * 5)
+
+
+def test_underline_box_arrow_drawn(profile):
+    layout = typeset("_Важно_ знать: [[итог]] -> вывод, x^2 и H_2O", profile, Settings(seed=1))
+    page = layout.pages[0]
+    # подчёркивание + рамка + стрелка (стержень и два штриха наконечника)
+    assert len(page.lines) == 1 + 1 + 3
+    assert reconstruct_text(layout) == ["Важно", "знать:", "итог", "->", "вывод,", "x2", "и", "H2O"]
+    im = render_page(page, profile, layout.settings)
+    assert np.asarray(im).min() < 120
+
+
+def test_corrections_strike_some_words(profile):
+    text = " ".join(["Неожиданно длинное предложение с многочисленными словами."] * 20)
+    plain = typeset(text, profile, Settings(seed=2))
+    fixed = typeset(text, profile, Settings(seed=2, corrections=0.15))
+    assert not any(p.lines for p in plain.pages)
+    assert sum(len(p.lines) for p in fixed.pages) >= 3
+    assert reconstruct_text(fixed) == source_words(text)  # описки — не часть текста
+
+
+def test_tiredness_grows_handwriting(profile):
+    text = " ".join(["Неожиданно длинное предложение с многочисленными словами."] * 60)
+
+    def last_scale(t):
+        lay = typeset(text, profile, Settings(seed=3, tiredness=t))
+        gs = lay.pages[-1].glyphs[-60:]
+        return np.mean([g.scale for g in gs]), len(lay.pages)
+
+    calm, tired = last_scale(0.0), last_scale(1.0)
+    assert tired[0] > calm[0] * 1.03
+
+
+def test_numbered_and_right_aligned(profile):
+    s = Settings(seed=1)
+    layout = typeset(">> 23.10\n1. Вопрос", profile, s)
+    page = layout.pages[0]
+    W = s.page_mm[0]
+    date = [g for g in page.glyphs if g.y < page.glyphs[-1].y - 3]
+    assert min(g.x for g in date) > W / 2  # дата справа
+    assert reconstruct_text(layout) == ["23.10", "Вопрос"]

@@ -127,12 +127,28 @@ def _draw_connector(page: np.ndarray, c, s: Settings, ink: np.ndarray) -> None:
     _blend(page, soft, int(x0), int(y0), ink, c.opacity)
 
 
+def _draw_line(page: np.ndarray, ln, s: Settings, ink: np.ndarray) -> None:
+    ppm = mm_to_px(1.0, s.dpi)
+    pts = np.array(ln.points, float) * ppm
+    x0, y0 = np.floor(pts.min(axis=0)).astype(int) - 6
+    x1, y1 = np.ceil(pts.max(axis=0)).astype(int) + 6
+    canvas = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    shift = 4
+    poly = np.round((pts - [x0, y0]) * (1 << shift)).astype(np.int32)
+    width = max(1, int(round(ln.width_mm * ppm)))
+    cv2.polylines(canvas, [poly], False, 255, width, cv2.LINE_AA, shift)
+    soft = cv2.GaussianBlur(canvas.astype(np.float32) / 255.0, (0, 0), max(0.5, 0.08 * ppm))
+    _blend(page, soft, int(x0), int(y0), ink, ln.opacity)
+
+
 def render_page(page: Page, profile: Profile, s: Settings, index: int = 0) -> Image.Image:
     rng = np.random.default_rng((s.seed, index))
     canvas = _paper(s, rng)
     base_ink = np.array(s.ink_color or profile.params.ink_color, np.float32)
     for c in page.connectors:
         _draw_connector(canvas, c, s, base_ink)
+    for ln in page.lines:
+        _draw_line(canvas, ln, s, base_ink)
     for g in page.glyphs:
         ink = np.clip(base_ink + rng.normal(0, 4, 3), 0, 255).astype(np.float32)
         _draw_glyph(canvas, g, profile, s, ink)
