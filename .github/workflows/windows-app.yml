@@ -12,8 +12,20 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # Имя репозитория кончается точкой, а Windows убирает точку в конце имени
+    # папки: рабочая папка Actions не создаётся и actions/checkout падает.
+    # Поэтому код берём в D:\k и работаем там.
+    defaults:
+      run:
+        working-directory: D:\k
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        working-directory: D:\
+        run: |
+          git init -q k
+          git -C k remote add origin "https://github.com/${{ github.repository }}"
+          git -C k fetch -q --depth 1 origin "${{ github.sha }}"
+          git -C k checkout -q FETCH_HEAD
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -36,7 +48,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Konspekt-windows
-          path: dist/Konspekt
+          path: D:\k\dist\Konspekt
       - name: Zip
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
@@ -48,7 +60,7 @@ jobs:
           tag_name: v0.2.${{ github.run_number }}
           name: Конспекты от руки 0.2.${{ github.run_number }}
           make_latest: "true"
-          files: Konspekt-windows.zip
+          files: D:/k/Konspekt-windows.zip
           body: |
             Программа для Windows, Python не нужен.
             Скачайте Konspekt-windows.zip, распакуйте и запустите Konspekt\Konspekt.exe.
