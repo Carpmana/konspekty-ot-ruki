@@ -234,3 +234,22 @@ def test_light_theme_dialogs_readable(app, window):
     pal = box.palette()
     assert pal.color(QPalette.Window).lightness() > 200
     assert pal.color(QPalette.WindowText).lightness() < 80
+
+
+def test_insert_helpers(app, window):
+    window.text_edit.setPlainText("1. Первый\nтекст")
+    c = window.text_edit.textCursor()
+    c.movePosition(c.MoveOperation.End)
+    window.text_edit.setTextCursor(c)
+    window.insert_question()
+    assert window.text_edit.toPlainText().endswith("2. \nтекст")
+    window.text_edit.setPlainText("важное слово")
+    c = window.text_edit.textCursor()
+    c.select(c.SelectionType.WordUnderCursor)
+    window.text_edit.setTextCursor(c)
+    window.wrap_selection("_", "_")
+    assert window.text_edit.toPlainText() == "_важное_ слово"
+    window.tired_slider.setValue(5)
+    window.fix_slider.setValue(4)
+    o = window.options()
+    assert o.tiredness == 0.5 and abs(o.corrections - 0.02) < 1e-9

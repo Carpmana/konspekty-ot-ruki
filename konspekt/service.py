@@ -239,6 +239,8 @@ class Options:
     offset_y_mm: float = 0.0
     spread: bool = False  # двойной листок целиком: две страницы рядом, с оборотом
     nested: bool = True  # листки вкладываются друг в друга, как в тетради (иначе — стопкой)
+    tiredness: float = 0.0  # 0–1: рука устаёт к концу конспекта
+    corrections: float = 0.0  # доля слов с зачёркнутой опиской перед ними
 
     @property
     def fmt(self) -> PageFormat:
@@ -267,7 +269,8 @@ class Options:
                             highlight_missing=self.show_missing and not self.real_paper,
                             margin_line=mode != "none",
                             margin_left_mm=f.outer_mm if mode != "none" else f.inner_mm,
-                            margin_right_mm=f.inner_mm)
+                            margin_right_mm=f.inner_mm,
+                            tiredness=self.tiredness, corrections=self.corrections)
 
 
 @dataclass
@@ -300,7 +303,8 @@ def _mirror_page(page: lay.Page, dx: float) -> lay.Page:
     """Сдвигает строки правой страницы тетради: поле у неё справа."""
     glyphs = [replace(g, x=g.x + dx) for g in page.glyphs]
     conns = [replace(c, p0=(c.p0[0] + dx, c.p0[1]), p1=(c.p1[0] + dx, c.p1[1])) for c in page.connectors]
-    return replace(page, glyphs=glyphs, connectors=conns)
+    lines = [replace(ln, points=[(x + dx, y) for x, y in ln.points]) for ln in page.lines]
+    return replace(page, glyphs=glyphs, connectors=conns, lines=lines)
 
 
 def _ink_only(im: Image.Image, opts: Options, dpi: int) -> Image.Image:
@@ -391,3 +395,78 @@ def export_pdf(text: str, prof: Profile, opts: Options, path: str | Path, dpi: i
     r = render_text(text, prof, opts, dpi, for_print=True)
     save_pdf(r.images, path, dpi)
     return r
+
+
+# ---------- текст из файлов и вставки ----------
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def docx_text(path: str | Path) -> str:
+    """Текст документа Word: заголовки → «# », списки → «- », абзацы — строки."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+    lines = []
+    for p in root.iter(f"{_W}p"):
+        parts = []
+        for el in p.iter():
+            if el.tag == f"{_W}t" and el.text:
+                parts.append(el.text)
+            elif el.tag in (f"{_W}tab", f"{_W}br"):
+                parts.append(" ")
+        text = " ".join("".join(parts).split())
+        style = p.find(f"{_W}pPr/{_W}pStyle")
+        name = (style.get(f"{_W}val") or "").lower() if style is not None else ""
+        if not text:
+            if lines and lines[-1]:
+                lines.append("")
+            continue
+        if "heading" in name or "заголов" in name or name == "title":
+            lines.append("# " + text)
+        elif p.find(f"{_W}pPr/{_W}numPr") is not None or "list" in name:
+            lines.append("- " + text)
+        else:
+            lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def read_text_file(path: str | Path) -> str:
+    path = Path(path)
+    if path.suffix.lower() == ".docx":
+        return docx_text(path)
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "cp1251"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+_DAYS = ("первое второе третье четвёртое пятое шестое седьмое восьмое девятое десятое одиннадцатое "
+         "двенадцатое тринадцатое четырнадцатое пятнадцатое шестнадцатое семнадцатое восемнадцатое "
+         "девятнадцатое двадцатое").split()
+_MONTHS = ("января февраля марта апреля мая июня июля августа сентября октября ноября декабря").split()
+
+
+def date_words(d) -> str:
+    """23 октября → «Двадцать третье октября», как пишут в школьных тетрадях."""
+    n = d.day
+    if n <= 20:
+        day = _DAYS[n - 1]
+    elif n == 30:
+        day = "тридцатое"
+    else:
+        day = ("двадцать " if n < 30 else "тридцать ") + _DAYS[n % 10 - 1]
+    return f"{day[0].upper()}{day[1:]} {_MONTHS[d.month - 1]}"
+
+
+def next_question_number(text_before: str) -> int:
+    """Номер следующего вопроса: на единицу больше последнего «N.» выше курсора."""
+    import re
+
+    nums = re.findall(r"^\s*(\d{1,3})[.)]\s", text_before, re.M)
+    return int(nums[-1]) + 1 if nums else 1

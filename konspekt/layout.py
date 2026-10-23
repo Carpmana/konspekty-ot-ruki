@@ -21,6 +21,49 @@ from .variation import AR1, SmoothNoise, VariantPicker
 
 FALLBACK_FONT = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
 TIGHT_PUNCT = set(".,:;!?»)")
+TRAIL_PUNCT = ".,:;!?»)"
+ARROWS = {"->": "right", "→": "right", "=>": "double", "⇒": "double",
+          "<-": "left", "←": "left", "<->": "both", "↔": "both"}
+SCRIPT_SCALE = 0.62
+LATIN_TWINS = dict(zip("ABCEHKMOPTXaceopxyu", "АВСЕНКМОРТХасеорхуи"))
+
+
+def script_marks(word: str) -> tuple[str, list[str]]:
+    """«x^2», «x^{10}», «H_2O» → текст без значков и пометки sup/sub для каждой буквы."""
+    if len(word) < 3 or not any(c in word[1:] for c in "^_"):
+        return word, [""] * len(word)
+    out, marks, i = [], [], 0
+    while i < len(word):
+        c = word[i]
+        if c in "^_" and i > 0 and i + 1 < len(word):
+            mode = "sup" if c == "^" else "sub"
+            if word[i + 1] == "{" and "}" in word[i + 2:]:
+                j = word.index("}", i + 2)
+                part, i = word[i + 2:j], j + 1
+            else:
+                j = i + 1
+                while j < len(word) and word[j].isdigit():
+                    j += 1
+                j = max(j, i + 2)
+                part, i = word[i + 1:j], j
+            out += list(part)
+            marks += [mode] * len(part)
+            continue
+        out.append(c)
+        marks.append("")
+        i += 1
+    return "".join(out), marks
+
+
+def make_typo(word: str, rng: np.random.Generator) -> str:
+    """Правдоподобная описка: переставлены две соседние буквы или слово брошено на середине."""
+    if rng.random() < 0.35:
+        return word[:max(2, int(len(word) * rng.uniform(0.4, 0.7)))]
+    for _ in range(6):
+        k = int(rng.integers(1, len(word) - 1))
+        if word[k] != word[k + 1]:
+            return word[:k] + word[k + 1] + word[k] + word[k + 2:]
+    return word[:-1]
 MAX_CLUSTER = 4
 
 
@@ -44,6 +87,8 @@ class Settings:
     seed: int = 1
     paper_texture: bool = True
     highlight_missing: bool = False
+    tiredness: float = 0.0  # 0–1: к концу конспекта почерк крупнее, размашистее и небрежнее
+    corrections: float = 0.0  # доля слов, перед которыми пишется и зачёркивается ошибка
 
     @property
     def page_mm(self) -> tuple[float, float]:
@@ -74,6 +119,14 @@ class Connector:
 
 
 @dataclass
+class InkLine:
+    """Штрих от руки: подчёркивание, рамка, стрелка, зачёркивание."""
+    points: list[tuple[float, float]]
+    width_mm: float
+    opacity: float = 0.9
+
+
+@dataclass
 class TraceLine:
     words: list[str] = field(default_factory=list)
     hyphen: bool = False
@@ -84,6 +137,7 @@ class Page:
     glyphs: list[Glyph] = field(default_factory=list)
     connectors: list[Connector] = field(default_factory=list)
     trace: list[TraceLine] = field(default_factory=list)
+    lines: list[InkLine] = field(default_factory=list)
 
 
 @dataclass
@@ -92,6 +146,8 @@ class WordPlan:
     connectors: list[Connector]
     width: float
     trace: str | None  # None — служебный знак (маркер списка)
+    lines: list[InkLine] = field(default_factory=list)
+    deco: frozenset = frozenset()  # "under" — подчёркнуто, "box" — в рамке
 
 
 @dataclass
@@ -155,11 +211,56 @@ class Typesetter:
         self.base_scale = _mm_per_px(self.base_scale_ratio)
         self.word_shear = AR1(self.rng, 0.025)
         self.fatigue = 1.0
+        self.tired = 0.0  # усталость за весь конспект: tiredness × доля написанного
+        self.typo_rng = np.random.default_rng((settings.seed, 7))
+
+    # ---------- штрихи от руки ----------
+
+    def _wobbly(self, pts: list[tuple[float, float]], jitter: float = 0.12) -> list[tuple[float, float]]:
+        """Ломаная по точкам с мелким дрожанием руки."""
+        out = [pts[0]]
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            n = max(2, int(math.hypot(x1 - x0, y1 - y0) / 2.0))
+            for k in range(1, n + 1):
+                t = k / n
+                j = self.rng.normal(0, jitter) if k < n else 0.0
+                out.append((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t + j))
+        return out
+
+    def _stroke(self) -> float:
+        return self.hp.stroke_mm * self.base_scale_ratio
+
+    def build_arrow(self, kind: str, trace: str) -> WordPlan:
+        xh, rng = self.xh_mm, self.rng
+        length = 2.6 * xh * rng.normal(1.0, 0.08)
+        y = -0.5 * xh
+        rise = rng.normal(0, 0.15)
+        head = 0.55 * xh
+        lines = []
+        shafts = (y - 0.18 * xh, y + 0.18 * xh) if kind == "double" else (y,)
+        for sy in shafts:
+            lines.append(InkLine(self._wobbly([(0.0, sy), (length, sy + rise)], 0.06), self._stroke()))
+        ends = {"right": [(length, y + rise, -1)], "double": [(length, y + rise, -1)],
+                "left": [(0.0, y, 1)], "both": [(length, y + rise, -1), (0.0, y, 1)]}[kind]
+        for ex, ey, d in ends:
+            for side in (-1, 1):
+                a = math.radians(rng.normal(32, 4))
+                lines.append(InkLine([(ex + d * head * math.cos(a), ey + side * head * math.sin(a)), (ex, ey)],
+                                     self._stroke()))
+        return WordPlan([], [], length, trace, lines)
+
+    def strike(self, plan: WordPlan) -> None:
+        """Зачёркивает слово одной-двумя линиями."""
+        xh, rng = self.xh_mm, self.rng
+        for k in range(1 if rng.random() < 0.6 else 2):
+            y0 = -0.65 * xh + rng.normal(0, 0.1 * xh) + 0.25 * xh * k
+            y1 = y0 + rng.normal(-0.15 * xh, 0.12 * xh)
+            plan.lines.append(InkLine(self._wobbly([(-0.4, y0), (plan.width + 0.4, y1)], 0.08), self._stroke()))
 
     # ---------- слова ----------
 
-    def _choose(self, word: str, i: int, style: str) -> tuple[GlyphSample, str, bool]:
-        if style == BODY and self.rng.random() < self.hp.cluster_prob:
+    def _choose(self, word: str, i: int, style: str, plain: bool = True) -> tuple[GlyphSample, str, bool]:
+        if plain and style == BODY and self.rng.random() < self.hp.cluster_prob:
             for L in range(min(MAX_CLUSTER, len(word) - i), 1, -1):
                 sub = word[i:i + L]
                 if sub in self.clusters:
@@ -168,6 +269,8 @@ class Typesetter:
         vs = self.p.variants(ch, style)
         if not vs and style == HEADING:
             vs = self.p.variants(ch, BODY)
+        if not vs and ch in LATIN_TWINS:  # латинская H пишется так же, как русская Н
+            vs = self.p.variants(LATIN_TWINS[ch], style) or self.p.variants(LATIN_TWINS[ch], BODY)
         if vs:
             return self.picker.pick(f"{style}:{ch}", vs), ch, False
         self.missing.add(ch)
@@ -183,10 +286,12 @@ class Typesetter:
         return self._shapes[sample.id]
 
     def build_word(self, word: str, style: str = BODY, trace: str | None = "", tight: float = 1.0) -> WordPlan:
+        word, marks = script_marks(word)
         trace = word if trace == "" else trace
-        neat = self.s.neatness * self.fatigue
+        tired = self.tired
+        neat = self.s.neatness * self.fatigue * (1.0 + 1.2 * tired)
         rng = self.rng
-        word_scale = rng.normal(1.0, 0.03 * neat)
+        word_scale = rng.normal(1.0, 0.03 * neat) * (1.0 + 0.07 * tired)
         shear = self.word_shear.next(neat)
         xh = self.xh_mm
         # Интервалы меряем только в полосе строчных: верхние и нижние
@@ -199,20 +304,27 @@ class Typesetter:
         right = 0.0
         i = 0
         while i < len(word):
-            sample, text, fb = self._choose(word, i, style)
+            mark = marks[i]
+            sample, text, fb = self._choose(word, i, style, plain=not any(marks))
             sc = self.base_scale * self.p.size_factor(sample) * word_scale * rng.normal(1.0, 0.025 * neat)
             dy = rng.normal(0, 0.12 * neat)
+            if mark:
+                sc *= SCRIPT_SCALE
+                dy += -0.8 * xh if mark == "sup" else 0.35 * xh
             e, _, entry = self._shape(sample)
             if prev is None:
                 x = 0.0
             else:
                 p_edges, p_exit, _ = self._shape(prev.sample)
-                join = (not prev.fallback and not fb and _is_lower(prev.text[-1]) and _is_lower(text[0])
+                join = (not mark and not marks[i - 1] and not prev.fallback and not fb
+                        and _is_lower(prev.text[-1]) and _is_lower(text[0])
                         and p_exit is not None and entry is not None and rng.random() < self.hp.join_prob)
                 if join:
                     gap = max(0.35, rng.normal(0.9, 0.25))  # место под соединительный штрих
                 else:
-                    gap = self.hp.optical_gap_mm * max(0.3, rng.normal(1.0, 0.25 * neat))
+                    gap = self.hp.optical_gap_mm * max(0.3, rng.normal(1.0, 0.25 * neat)) * (1.0 + 0.25 * tired)
+                    if mark or marks[i - 1]:
+                        gap *= 0.5
                     if text[0] in TIGHT_PUNCT:
                         gap *= 0.4
                 gap *= tight
@@ -257,34 +369,48 @@ class Typesetter:
         cur_trace = TraceLine()
         x = left
 
-        def flush(center: bool = False) -> None:
+        total_words = max(1, sum(len(b.words) for b in blocks))
+        done_words = 0
+
+        def flush(align: str = "left") -> None:
             nonlocal cur, cur_trace, line_idx, x
             if cur:
                 page = pages[-1]
                 base_y = first_base + line_idx * pitch
+                tired = self.tired
+                neat = self.s.neatness * (1.0 + tired)
                 # Соседние строки похожи: наклон и отступ слева меняются плавно,
-                # а строка не ложится точно на линию клетки.
-                slope = math.tan(math.radians(self.hp.line_slope_deg + self.line_slope.next()))
-                wobble = SmoothNoise(self.rng, self.hp.baseline_wobble_mm * self.s.neatness * self.fatigue)
+                # а строка не ложится точно на линию клетки. Уставшая рука
+                # заметнее уводит строку вверх.
+                slope = math.tan(math.radians(self.hp.line_slope_deg + self.line_slope.next() - 1.2 * tired))
+                wobble = SmoothNoise(self.rng, self.hp.baseline_wobble_mm * neat * self.fatigue)
                 start_jitter = self.line_start.next()
-                base_y += self.rng.normal(0, 0.3 * self.s.neatness)
+                base_y += self.rng.normal(0, 0.3 * neat)
                 shift = start_jitter
-                if center:
-                    used = cur[-1][0] + cur[-1][1].width - cur[0][0]
+                used = cur[-1][0] + cur[-1][1].width - cur[0][0]
+                if align == "center":
                     shift += (right - left - used) / 2 - (cur[0][0] - left)
+                elif align == "right":
+                    shift += right - used - (cur[0][0] - left) - left - abs(self.rng.normal(1.0, 0.8))
+
+                def at(X: float, dy: float) -> tuple[float, float]:
+                    return X, base_y + slope * (X - left) + wobble(X) + dy
+
+                word_dys = []
                 for wx, plan in cur:
-                    word_dy = self.rng.normal(0, 0.15 * self.s.neatness)
+                    word_dy = self.rng.normal(0, 0.15 * neat)
+                    word_dys.append(word_dy)
                     for gl in plan.glyphs:
-                        X = wx + gl.x + shift
-                        Y = base_y + slope * (X - left) + wobble(X) + word_dy + gl.y
+                        X, Y = at(wx + gl.x + shift, word_dy + gl.y)
                         page.glyphs.append(Glyph(gl.sample, gl.text, X, Y, gl.scale, gl.shear, gl.rot,
                                                  gl.opacity, gl.fallback))
                     for c in plan.connectors:
-                        pts = []
-                        for (cx, cy) in (c.p0, c.p1):
-                            X = wx + cx + shift
-                            pts.append((X, base_y + slope * (X - left) + wobble(X) + word_dy + cy))
+                        pts = [at(wx + cx + shift, word_dy + cy) for (cx, cy) in (c.p0, c.p1)]
                         page.connectors.append(Connector(pts[0], pts[1], c.width_mm, c.opacity))
+                    for ln in plan.lines:
+                        pts = [at(wx + lx + shift, word_dy + ly) for (lx, ly) in ln.points]
+                        page.lines.append(InkLine(pts, ln.width_mm, ln.opacity))
+                self._decorate(page, cur, shift, at)
                 page.trace.append(cur_trace)
             cur, cur_trace = [], TraceLine()
             line_idx += 1
@@ -305,6 +431,7 @@ class Typesetter:
         def word_gap() -> float:
             return self.hp.word_gap_mm * max(0.4, self.rng.normal(1.0, 0.18 * self.s.neatness))
 
+        deco: set[str] = set()
         for block in blocks:
             if block.kind == doc.GAP:
                 flush()
@@ -314,9 +441,32 @@ class Typesetter:
                 x = left + self.s.indent_mm + self.rng.normal(0, 1.2 * self.s.neatness)
             if block.kind == doc.ITEM:
                 place(self.build_word("—", BODY, trace=None), 0.0)
+            if block.kind == doc.NUMBERED:
+                place(self.build_word(block.marker, BODY, trace=None), 0.0)
+            deco.clear()
             for w in block.words:
-                plan = self.build_word(w, style)
-                gap = word_gap()
+                self.tired = self.s.tiredness * done_words / total_words
+                done_words += 1
+                w, starts, ends = _deco_marks(w)
+                deco |= starts
+                if not w:
+                    deco -= ends
+                    continue
+                if w in ARROWS:
+                    plan = self.build_arrow(ARROWS[w], w)
+                else:
+                    plan = self.build_word(w, style)
+                plan.deco = frozenset(deco)
+                deco -= ends
+                gap = word_gap() * (1.0 + 0.3 * self.tired)
+                if (style == BODY and self.s.corrections > 0 and not plan.deco and w not in ARROWS
+                        and self.typo_rng.random() < self.s.corrections):
+                    core = w.rstrip(TRAIL_PUNCT)
+                    if len(core) >= 4 and core.isalpha():
+                        wrong = self.build_word(make_typo(core, self.typo_rng), style, trace=None)
+                        self.strike(wrong)
+                        if x + 2 * gap + wrong.width + plan.width <= right:
+                            place(wrong, gap)
                 if not cur or x + gap + plan.width <= right + overflow:
                     place(plan, gap)
                     continue
@@ -336,10 +486,35 @@ class Typesetter:
                 else:
                     flush()
                     place(plan, 0.0)
-            flush(center=(block.kind == doc.HEADING))
+            flush({doc.HEADING: "center", doc.CENTER: "center", doc.RIGHT: "right"}.get(block.kind, "left"))
         if not pages[-1].glyphs and len(pages) > 1:
             pages.pop()
         return Layout(pages, self.missing, self.s)
+
+    def _decorate(self, page: Page, cur: list[tuple[float, "WordPlan"]], shift: float, at) -> None:
+        """Подчёркивания и рамки вокруг подряд идущих слов строки."""
+        xh, stroke = self.xh_mm, self._stroke()
+        for kind in ("under", "box"):
+            runs: list[list[float]] = []
+            prev_in = False
+            for wx, plan in cur:
+                inside = kind in plan.deco
+                if inside and prev_in:
+                    runs[-1][1] = wx + shift + plan.width
+                elif inside:
+                    runs.append([wx + shift, wx + shift + plan.width])
+                prev_in = inside
+            for x0, x1 in runs:
+                if kind == "under":
+                    y = 0.45 * xh + self.rng.normal(0, 0.1)
+                    pts = [at(x0 - 0.5, y), at(x1 + 0.8, y + self.rng.normal(0, 0.2))]
+                    page.lines.append(InkLine(self._wobbly(pts, 0.07), stroke))
+                else:
+                    top, bot = -1.75 * xh, 0.75 * xh
+                    a, b = x0 - 1.2, x1 + 1.2
+                    corners = [at(a, top), at(b, top + self.rng.normal(0, 0.2)), at(b, bot),
+                               at(a, bot + self.rng.normal(0, 0.2)), at(a + 0.6, top - 0.3)]
+                    page.lines.append(InkLine(self._wobbly(corners, 0.08), stroke))
 
     def _hyphenate(self, word: str, style: str, room: float) -> tuple[WordPlan, WordPlan] | None:
         core = word.rstrip(".,:;!?»)")
@@ -352,6 +527,33 @@ class Typesetter:
             if head.width <= room:
                 return head, self.build_word(word[pos:], style)
         return None
+
+
+def _deco_marks(word: str) -> tuple[str, set[str], set[str]]:
+    """Снимает метки «_…_» (подчеркнуть) и «[[…]]» (рамка) с краёв слова."""
+    starts: set[str] = set()
+    ends: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        if word.startswith("[["):
+            word, changed = word[2:], True
+            starts.add("box")
+        if word.startswith("_") and len(word) > 1:
+            word, changed = word[1:], True
+            starts.add("under")
+    core = word.rstrip(TRAIL_PUNCT)
+    punct = word[len(core):]
+    changed = True
+    while changed:
+        changed = False
+        if core.endswith("]]"):
+            core, changed = core[:-2], True
+            ends.add("box")
+        if core.endswith("_") and len(core) > 1:
+            core, changed = core[:-1], True
+            ends.add("under")
+    return core + punct, starts, ends
 
 
 def _is_lower(ch: str) -> bool:

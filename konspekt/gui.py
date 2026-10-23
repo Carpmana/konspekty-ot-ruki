@@ -6,6 +6,7 @@
 чтобы окно не зависало. Сами действия — в service.py.
 """
 
+import datetime
 import os
 import sys
 import traceback
@@ -91,7 +92,9 @@ PLACEHOLDER = """Вставьте сюда текст конспекта.
 
 # Заголовок — строка с решёткой в начале
 - пункт списка — строка с дефисом
-Пустая строка — отступ. Каждая строка — отдельный абзац."""
+1. вопрос с номером,  = строка по центру,  >> строка справа (дата)
+_подчеркнуть_,  [[в рамку]],  -> стрелка,  x^2 степень,  H_2O индекс
+Всё это есть в кнопке «Вставить ▾». Пустая строка — отступ."""
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -701,6 +704,22 @@ class MainWindow(QMainWindow):
         ends.addStretch(1)
         ends.addWidget(QLabel("небрежно", objectName="hint"))
         sl.addLayout(ends)
+        self.tired_slider = QSlider(Qt.Horizontal)
+        self.tired_slider.setRange(0, 10)
+        self.tired_slider.setToolTip("К концу конспекта почерк становится крупнее, размашистее и небрежнее, "
+                                     "строки уползают вверх — как у уставшей руки")
+        sl.addWidget(QLabel("Рука устаёт к концу"))
+        sl.addWidget(self.tired_slider)
+        self.fix_slider = QSlider(Qt.Horizontal)
+        self.fix_slider.setRange(0, 10)
+        self.fix_slider.setToolTip("Изредка перед словом пишется описка и зачёркивается. 0 — без исправлений")
+        sl.addWidget(QLabel("Исправления (зачёркнутые описки)"))
+        sl.addWidget(self.fix_slider)
+        fends = QHBoxLayout()
+        fends.addWidget(QLabel("нет", objectName="hint"))
+        fends.addStretch(1)
+        fends.addWidget(QLabel("часто", objectName="hint"))
+        sl.addLayout(fends)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(0.0, 8.0)
         self.size_spin.setSingleStep(0.25)
@@ -770,7 +789,17 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel("Текст конспекта", objectName="cardTitle"))
         top.addStretch(1)
+        insert_btn = QPushButton("Вставить ▾")
+        insert_btn.setToolTip("Дата, тема, вопрос с номером, подчёркивание, рамка, стрелка, степень")
+        self.insert_menu = QMenu(insert_btn)
+        insert_btn.setMenu(self.insert_menu)
+        top.addWidget(insert_btn)
+        dictate_btn = QPushButton("Диктовать")
+        dictate_btn.setToolTip("Голосовой ввод Windows (Win+H): говорите, текст появится в поле")
+        dictate_btn.clicked.connect(self.dictate)
+        top.addWidget(dictate_btn)
         open_btn = QPushButton("Открыть файл…")
+        open_btn.setToolTip("Текст (.txt) или документ Word (.docx)")
         open_btn.clicked.connect(self.open_text)
         top.addWidget(open_btn)
         tl.addLayout(top)
@@ -826,7 +855,8 @@ class MainWindow(QMainWindow):
 
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
-                    self.neat_slider.valueChanged, self.size_spin.valueChanged, self.pitch_spin.valueChanged,
+                    self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
+                    self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
             sig.connect(self.schedule_preview)
         self.text_edit.textChanged.connect(self._update_counter)
@@ -887,6 +917,10 @@ class MainWindow(QMainWindow):
         act(m, "Открыть папку профилей", self.open_profiles_dir)
         act(m, "Выбрать папку профилей…", self.choose_profiles_dir)
 
+        m = self.menuBar().addMenu("Вставить")
+        self._fill_insert_menu(m, act)
+        self._fill_insert_menu(self.insert_menu, act, shortcuts=False)
+
         m = self.menuBar().addMenu("Вид")
         act(m, "Перегенерировать (следующий вариант)", self.next_variant, "Ctrl+R")
         act(m, "Обновить предпросмотр", self.refresh_preview, "F5")
@@ -905,6 +939,8 @@ class MainWindow(QMainWindow):
             self._format_changed()
         self.seed_spin.setValue(int(q.value("seed", sv.DEFAULT_SEED)))
         self.neat_slider.setValue(int(q.value("neatness10", 10)))
+        self.tired_slider.setValue(int(q.value("tiredness10", 3)))
+        self.fix_slider.setValue(int(q.value("corrections10", 0)))
         self.size_spin.setValue(float(q.value("size_mm", 0.0)))
         self.pitch_spin.setValue(float(q.value("pitch_mm", 10.0)))
         self.real_paper.setChecked(q.value("real_paper", "false") in (True, "true"))
@@ -929,6 +965,8 @@ class MainWindow(QMainWindow):
         q.setValue("nested", self.nested_box.isChecked())
         q.setValue("seed", self.seed_spin.value())
         q.setValue("neatness10", self.neat_slider.value())
+        q.setValue("tiredness10", self.tired_slider.value())
+        q.setValue("corrections10", self.fix_slider.value())
         q.setValue("size_mm", self.size_spin.value())
         q.setValue("pitch_mm", self.pitch_spin.value())
         q.setValue("profile", self.profile_box.currentText())
@@ -946,7 +984,8 @@ class MainWindow(QMainWindow):
                           show_missing=self.show_missing.isChecked(), margins=self.margin_box.currentData(),
                           real_paper=self.real_paper.isChecked(), offset_x_mm=self.off_x.value(),
                           offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
-                          nested=self.nested_box.isChecked())
+                          nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
+                          corrections=self.fix_slider.value() / 200)
 
     # ---------- профили ----------
 
@@ -1058,15 +1097,81 @@ class MainWindow(QMainWindow):
     # ---------- текст ----------
 
     def open_text(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Текст конспекта", "", "Текст (*.txt *.md);;Все файлы (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Текст конспекта", "",
+                                              "Текст и Word (*.txt *.md *.docx);;Все файлы (*)")
         if path:
-            raw = Path(path).read_bytes()
-            for enc in ("utf-8-sig", "cp1251"):
-                try:
-                    self.text_edit.setPlainText(raw.decode(enc))
-                    return
-                except UnicodeDecodeError:
-                    continue
+            try:
+                self.text_edit.setPlainText(sv.read_text_file(path))
+            except Exception as e:  # битый или не тот файл
+                QMessageBox.warning(self, APP_NAME, f"Не удалось открыть файл:\n{e}")
+
+    # ---------- вставки ----------
+
+    def _fill_insert_menu(self, m: QMenu, act, shortcuts: bool = True):
+        def key(k):
+            return k if shortcuts else None
+
+        today = datetime.date.today
+        act(m, "Дата справа (словами)", lambda: self.insert_line(">> " + sv.date_words(today())))
+        act(m, "Дата справа (цифрами)", lambda: self.insert_line(">> " + today().strftime("%d.%m.%Y")))
+        act(m, "«Классная работа» по центру", lambda: self.insert_line("= Классная работа"))
+        act(m, "«Домашняя работа» по центру", lambda: self.insert_line("= Домашняя работа"))
+        act(m, "Тема по центру", lambda: self.insert_line("= Тема: ", select_end=True))
+        act(m, "Вопрос с номером", self.insert_question, key("Ctrl+Shift+N"))
+        m.addSeparator()
+        act(m, "Подчеркнуть выделенное", lambda: self.wrap_selection("_", "_"), key("Ctrl+U"))
+        act(m, "Обвести выделенное рамкой", lambda: self.wrap_selection("[[", "]]"), key("Ctrl+Shift+B"))
+        act(m, "Стрелка →", lambda: self.text_edit.insertPlainText(" -> "))
+        act(m, "Степень (x²)", lambda: self.wrap_selection("^{", "}"))
+        act(m, "Индекс (x₂)", lambda: self.wrap_selection("_{", "}"))
+
+    def insert_line(self, line: str, select_end: bool = False):
+        """Вставляет отдельную строку там, где курсор."""
+        c = self.text_edit.textCursor()
+        c.movePosition(c.MoveOperation.StartOfBlock)
+        has_text = bool(c.block().text().strip())
+        c.insertText(line + ("\n" if has_text else ""))
+        if has_text:
+            c.movePosition(c.MoveOperation.PreviousBlock)
+            c.movePosition(c.MoveOperation.EndOfBlock)
+        self.text_edit.setTextCursor(c)
+        self.text_edit.setFocus()
+
+    def insert_question(self):
+        c = self.text_edit.textCursor()
+        before = self.text_edit.toPlainText()[:c.position()]
+        self.insert_line(f"{sv.next_question_number(before)}. ")
+
+    def wrap_selection(self, left: str, right: str):
+        c = self.text_edit.textCursor()
+        text = c.selectedText().strip()
+        c.insertText(f"{left}{text}{right}")
+        if not text:
+            c.movePosition(c.MoveOperation.Left, n=len(right))
+        self.text_edit.setTextCursor(c)
+        self.text_edit.setFocus()
+
+    def dictate(self):
+        """Голосовой ввод Windows: в поле текста нажимаем за пользователя Win+H."""
+        self.text_edit.setFocus()
+        if sys.platform != "win32":
+            QMessageBox.information(self, APP_NAME, "Голосовой ввод работает в Windows: Win+H.")
+            return
+
+        def press():
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                VK_LWIN, VK_H, UP = 0x5B, 0x48, 0x0002
+                user32.keybd_event(VK_LWIN, 0, 0, 0)
+                user32.keybd_event(VK_H, 0, 0, 0)
+                user32.keybd_event(VK_H, 0, UP, 0)
+                user32.keybd_event(VK_LWIN, 0, UP, 0)
+            except (AttributeError, OSError):
+                pass
+        QTimer.singleShot(150, press)
+        self.statusBar().showMessage("Говорите — текст появится в поле. Если панель не открылась, нажмите Win+H.",
+                                     10000)
 
     def _update_counter(self):
         self.chars_label.setText(f"{len(self.text_edit.toPlainText())} знаков")

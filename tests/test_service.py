@@ -226,3 +226,24 @@ def test_drawn_sample_is_saved_and_removed(profile, tmp_path):
     again.save()
     assert not (root / got.file).exists()
     assert len(Profile.load(root).variants("ж")) == before
+
+
+def test_docx_text_and_helpers(tmp_path):
+    import datetime
+    import zipfile
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    body = (f'<w:document {w}><w:body>'
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Дроби</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Числитель </w:t></w:r><w:r><w:t>сверху.</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>пункт</w:t></w:r></w:p>'
+            '</w:body></w:document>')
+    path = tmp_path / "конспект.docx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", body)
+    assert sv.read_text_file(path) == "# Дроби\nЧислитель сверху.\n- пункт"
+    assert sv.date_words(datetime.date(2026, 10, 23)) == "Двадцать третье октября"
+    assert sv.date_words(datetime.date(2026, 3, 1)) == "Первое марта"
+    assert sv.date_words(datetime.date(2026, 5, 30)) == "Тридцатое мая"
+    assert sv.next_question_number("1. a\nтекст\n2) b\n") == 3
+    assert sv.next_question_number("") == 1
