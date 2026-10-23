@@ -154,6 +154,60 @@ def disable_crossed(prof: Profile, among: list[GlyphSample] | None = None, save:
     return crossed
 
 
+Stroke = list[tuple[float, float]]  # точки штриха в мм от левого верхнего угла клетки
+
+
+def _smooth(pts: Stroke, k: int = 2) -> Stroke:
+    """Сглаживание дрожи тачпада: скользящее среднее, концы на месте."""
+    if len(pts) < 3:
+        return pts
+    a = np.asarray(pts, np.float64)
+    out = a.copy()
+    for i in range(1, len(a) - 1):
+        lo, hi = max(0, i - k), min(len(a), i + k + 1)
+        out[i] = a[lo:hi].mean(axis=0)
+    return [tuple(p) for p in out]
+
+
+def strokes_to_alpha(strokes: list[Stroke], stroke_mm: float, baseline_mm: float,
+                     dpi: int = 300) -> tuple[np.ndarray, float]:
+    """Штрихи (мм) → картинка образца, как у отсканированных: плотность чернил
+    0..1 при 300 dpi, обрезанная по чернилам; и базовая линия в пикселях."""
+    import cv2
+    from PIL import ImageDraw
+
+    ss = 3  # рисуем крупнее и уменьшаем — края штриха сглаживаются
+    k = dpi / 25.4 * ss
+    pts_all = [p for st in strokes for p in st]
+    if not pts_all:
+        raise ValueError("Пустой рисунок")
+    xs, ys = [p[0] for p in pts_all], [p[1] for p in pts_all]
+    pad = stroke_mm * 2 + 0.5
+    x0, y0 = min(xs) - pad, min(ys) - pad
+    w = int((max(xs) - x0 + pad) * k) + 1
+    h = int((max(ys) - y0 + pad) * k) + 1
+    im = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(im)
+    r = max(stroke_mm * k / 2, 1.0)
+    for st in strokes:
+        pts = [((x - x0) * k, (y - y0) * k) for x, y in _smooth(st)]
+        if len(pts) > 1:
+            d.line(pts, fill=255, width=int(round(2 * r)), joint="curve")
+        for x, y in (pts[0], pts[-1]) if len(pts) > 1 else pts:
+            d.ellipse((x - r, y - r, x + r, y + r), fill=255)
+    im = im.resize((max(1, w // ss), max(1, h // ss)), Image.LANCZOS)
+    alpha = cv2.GaussianBlur(np.asarray(im, np.float32) / 255.0, (0, 0), 0.6)
+    return alpha, (baseline_mm - y0) * dpi / 25.4
+
+
+def add_drawn_sample(prof: Profile, text: str, strokes: list[Stroke], baseline_mm: float,
+                     style: str = "body") -> GlyphSample:
+    alpha, baseline = strokes_to_alpha(strokes, prof.params.stroke_mm, baseline_mm)
+    s = prof.add_drawn(text, alpha, baseline, style)
+    prof.save()
+    return s
+
+
 def coverage_text(prof: Profile) -> str:
     lines = [f"Профиль «{prof.name}»: {len(prof.samples)} образцов", ""]
     for group, info in prof.coverage().items():
@@ -183,10 +237,15 @@ class Options:
     real_paper: bool = False  # печать на настоящий листок: только чернила
     offset_x_mm: float = 0.0  # подстройка под принтер (для печати на листок)
     offset_y_mm: float = 0.0
+    spread: bool = False  # двойной листок целиком: две страницы рядом, с оборотом
 
     @property
     def fmt(self) -> PageFormat:
         return FORMAT_BY_KEY.get(self.page, FORMAT_BY_KEY["A4"])
+
+    @property
+    def use_spread(self) -> bool:
+        return self.spread and self.page == "notebook"
 
     @property
     def margin_mode(self) -> str:
@@ -216,6 +275,15 @@ class Rendered:
     missing: set[str]
     dpi: int
     size_mm: tuple[float, float] = (210.0, 297.0)
+    labels: list[str] = field(default_factory=list)  # подписи сторон листков (для разворота)
+
+    @property
+    def is_spread(self) -> bool:
+        return bool(self.labels)
+
+    def side_indices(self, inner: bool) -> list[int]:
+        """Стороны разворота: снаружи (чётные) или внутри (нечётные)."""
+        return list(range(int(inner), len(self.images), 2))
 
 
 def _mirror_page(page: lay.Page, dx: float) -> lay.Page:
@@ -250,8 +318,11 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
     layout = lay.typeset(text, prof, s)
     ink_only = for_print and opts.real_paper
     W = f.size_mm[0]
+    pages = list(layout.pages)
+    if opts.use_spread:
+        pages += [lay.Page() for _ in range(-len(pages) % 4)]  # листок — четыре страницы
     images = []
-    for i, page in enumerate(layout.pages):
+    for i, page in enumerate(pages):
         ps = s
         if opts.margin_mode == "outer" and i % 2 == 0:  # правая страница: поле справа
             page = _mirror_page(page, f.inner_mm - (f.outer_mm + 2.0))
@@ -260,7 +331,30 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
             ps = replace(ps, paper="blank", paper_texture=False)
         im = render_page(page, prof, ps, i)
         images.append(_ink_only(im, opts, dpi) if ink_only else im)
-    return Rendered(images, set(layout.missing), dpi, f.size_mm)
+    r = Rendered(images, set(layout.missing), dpi, f.size_mm)
+    return to_spreads(r) if opts.use_spread else r
+
+
+def to_spreads(r: Rendered) -> Rendered:
+    """Страницы тетради → стороны развёрнутых двойных листков (две страницы рядом).
+
+    Двойной листок — страницы 1–4. Снаружи: слева 4, справа 1; внутри:
+    слева 2, справа 3. Сначала печатается наружная сторона, потом листок
+    переворачивают и печатают внутреннюю."""
+    w, h = r.images[0].size
+    sides, labels = [], []
+    for k in range(0, len(r.images), 4):
+        p = r.images[k:k + 4]
+        n = k // 4 + 1
+        for left, right, where, nums in ((p[3], p[0], "снаружи", (k + 4, k + 1)),
+                                         (p[1], p[2], "внутри", (k + 2, k + 3))):
+            side = Image.new("RGB", (2 * w, h), (255, 255, 255))
+            side.paste(left, (0, 0))
+            side.paste(right, (w, 0))
+            sides.append(side)
+            labels.append(f"Листок {n}, {where}: страницы {nums[0]} и {nums[1]}")
+    W, H = r.size_mm
+    return Rendered(sides, r.missing, r.dpi, (2 * W, H), labels)
 
 
 def export_pdf(text: str, prof: Profile, opts: Options, path: str | Path, dpi: int = EXPORT_DPI) -> Rendered:

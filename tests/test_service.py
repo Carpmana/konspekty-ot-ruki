@@ -160,3 +160,46 @@ def test_crossed_sample_is_found_and_disabled(profile, tmp_path):
 def test_import_summary_mentions_crossed():
     r = sv.ImportResult(profile_dir=None, profile_name="Тест", crossed=["п"])
     assert "зачёркнутые: п" in r.summary()
+
+
+def test_double_sheet_spread(profile):
+    import numpy as np
+
+    plain = sv.render_text(TEXT, profile, sv.Options(page="notebook"), dpi=40)
+    assert len(plain.images) == 1
+    r = sv.render_text(TEXT, profile, sv.Options(page="notebook", spread=True), dpi=40)
+    # одна страница текста → один двойной листок: снаружи (4|1) и внутри (2|3)
+    assert len(r.images) == 2 and r.is_spread
+    assert r.size_mm == (340.0, 205.0)
+    w, h = plain.images[0].size
+    assert r.images[0].size == (2 * w, h)
+    assert "4 и 1" in r.labels[0] and "2 и 3" in r.labels[1]
+    assert r.side_indices(inner=False) == [0] and r.side_indices(inner=True) == [1]
+    # текст стр. 1 — правая половина наружной стороны
+    assert np.array_equal(np.asarray(r.images[0])[:, w:], np.asarray(plain.images[0]))
+    # A4 разворот не делает
+    assert not sv.render_text(TEXT, profile, sv.Options(page="A4", spread=True), dpi=40).is_spread
+
+
+def test_drawn_sample_is_saved_and_removed(profile, tmp_path):
+    import shutil
+
+    root = tmp_path / "Тест"
+    shutil.copytree(profile.root, root)
+    prof = Profile.load(root)
+    before = len(prof.variants("ж"))
+    # «ж» из трёх штрихов, строчная высотой ~4 мм над базовой линией 16 мм
+    strokes = [[(10, 12), (12, 14), (14, 16)], [(14, 12), (14, 16)], [(18, 12), (16, 14), (14, 16)]]
+    alpha, base = sv.strokes_to_alpha(strokes, 0.35, 16.0)
+    assert alpha.max() > 0.9 and 0 < base <= alpha.shape[0]
+    s = sv.add_drawn_sample(prof, "ж", strokes, 16.0)
+    again = Profile.load(root)
+    assert len(again.variants("ж")) == before + 1
+    got = next(x for x in again.samples if x.id == s.id)
+    assert got.source == "нарисовано в программе" and (root / got.file).exists()
+    # высота строчной ~4 мм при 300 dpi
+    assert 35 < got.baseline < 70
+    again.remove(s.id)
+    again.save()
+    assert not (root / got.file).exists()
+    assert len(Profile.load(root).variants("ж")) == before
