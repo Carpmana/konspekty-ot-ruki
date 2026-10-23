@@ -1,0 +1,8 @@
+[project]
+name = "konspekt"
+version = "0.1.0"
+description = "Конспекты от руки: печать текста вашим почерком по образцам"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

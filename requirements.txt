@@ -1,0 +1,6 @@
+numpy>=1.26
+opencv-contrib-python-headless>=4.8
+pillow>=10.0
+pymupdf>=1.24
+pyphen>=0.14
+PySide6>=6.6

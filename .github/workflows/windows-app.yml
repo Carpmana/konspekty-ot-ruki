@@ -1,0 +1,54 @@
+name: Windows app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r requirements-dev.txt pyinstaller
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/konspekt.spec
+      - name: Smoke test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          KONSPEKT_SMOKE: "1"
+        run: |
+          $p = Start-Process dist/Konspekt/Konspekt.exe -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Konspekt.exe exited with $($p.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Konspekt-windows
+          path: dist/Konspekt
+      - name: Zip
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: Compress-Archive -Path dist/Konspekt -DestinationPath Konspekt-windows.zip
+      - name: Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.2.${{ github.run_number }}
+          name: Конспекты от руки 0.2.${{ github.run_number }}
+          make_latest: "true"
+          files: Konspekt-windows.zip
+          body: |
+            Программа для Windows, Python не нужен.
+            Скачайте Konspekt-windows.zip, распакуйте и запустите Konspekt\Konspekt.exe.
