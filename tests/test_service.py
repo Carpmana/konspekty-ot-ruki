@@ -123,3 +123,40 @@ def test_lines_under_text(profile, pitch):
     first_base = math.ceil((s.margin_top_mm + pitch) / s.grid_mm) * s.grid_mm
     assert first_line == pytest.approx(first_base)
     lay.typeset(TEXT, profile, s)
+
+
+def crossed_copy(profile, tmp_path):
+    """Копия профиля, в которой один образец перечёркнут крестом."""
+    import shutil
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    root = tmp_path / "Тест"
+    shutil.copytree(profile.root, root)
+    prof = Profile.load(root)
+    s = next(s for s in prof.samples if s.text == "п" and len(prof.variants("п")) >= 3)
+    p = root / s.file
+    a = np.array(Image.open(p))
+    h, w = a.shape
+    cv2.line(a, (0, 0), (w - 1, h - 1), 255, 12)
+    cv2.line(a, (w - 1, 0), (0, h - 1), 255, 12)
+    Image.fromarray(a).save(p)
+    return Profile.load(root), s.id
+
+
+def test_crossed_sample_is_found_and_disabled(profile, tmp_path):
+    assert profile.find_crossed() == []  # аккуратные образцы не трогаем
+    prof, sid = crossed_copy(profile, tmp_path)
+    assert [s.id for s in prof.find_crossed()] == [sid]
+    assert sv.disable_crossed(prof, among=[]) == []
+    assert [s.id for s in sv.disable_crossed(prof)] == [sid]
+    again = Profile.load(prof.root)
+    assert not next(s for s in again.samples if s.id == sid).enabled
+    assert again.find_crossed() == []
+
+
+def test_import_summary_mentions_crossed():
+    r = sv.ImportResult(profile_dir=None, profile_name="Тест", crossed=["п"])
+    assert "зачёркнутые: п" in r.summary()

@@ -15,7 +15,7 @@ from PIL import Image
 
 from . import layout as lay
 from .extract import import_files
-from .profile import PROFILE_FILE, Profile, safe_folder_name
+from .profile import PROFILE_FILE, GlyphSample, Profile, safe_folder_name
 from .render import PAPER_COLOR, render_page, save_pdf
 from .units import mm_to_px
 
@@ -99,11 +99,15 @@ class ImportResult:
     files_without_markers: list[str] = field(default_factory=list)
     total_samples: int = 0
     skipped: list[str] = field(default_factory=list)  # уже импортированы раньше
+    crossed: list[str] = field(default_factory=list)  # отключённые зачёркнутые образцы
 
     def summary(self) -> str:
         pages = ", ".join(str(p + 1) for p in sorted(set(self.pages_found))) or "нет"
         lines = [f"Профиль «{self.profile_name}»", f"Найдены страницы бланка: {pages}",
                  f"Добавлено образцов: {self.added} (всего в профиле: {self.total_samples})"]
+        if self.crossed:
+            lines.append(f"Отключены образцы, похожие на зачёркнутые: {' '.join(self.crossed)}. "
+                         "Вернуть их можно в меню Почерк → Образцы букв.")
         if self.skipped:
             lines.append("Пропущены, уже импортированы раньше:")
             lines += [f"  • {Path(f).name}" for f in self.skipped]
@@ -124,11 +128,30 @@ def import_scans(profile_dir: str | Path, name: str, files: list[str | Path]) ->
         return ImportResult(root, prof.name, total_samples=len(prof.samples), skipped=[str(f) for f in skipped])
     rep = import_files(new)
     added = prof.add_extracted(rep.samples)
+    crossed = disable_crossed(prof, among=added, save=False)
     for f in new:
         prof.mark_imported(f)
     prof.save()
     return ImportResult(root, prof.name, list(rep.pages_found), len(added), rep.empty_cells,
-                        list(rep.files_without_markers), len(prof.samples), [str(f) for f in skipped])
+                        list(rep.files_without_markers), len(prof.samples), [str(f) for f in skipped],
+                        [s.text for s in crossed])
+
+
+def disable_crossed(prof: Profile, among: list[GlyphSample] | None = None, save: bool = True) -> list[GlyphSample]:
+    """Отключает образцы, похожие на зачёркнутые (при импорте — только среди
+    новых, чтобы не трогать то, что пользователь вернул сам). Они остаются в
+    профиле, и их можно вернуть в окне «Образцы букв»."""
+    crossed = prof.find_crossed()
+    if among is not None:
+        ids = {s.id for s in among}
+        crossed = [s for s in crossed if s.id in ids]
+    for s in crossed:
+        s.enabled = False
+    if crossed:
+        prof.measure()
+        if save:
+            prof.save()
+    return crossed
 
 
 def coverage_text(prof: Profile) -> str:

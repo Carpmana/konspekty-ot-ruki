@@ -133,3 +133,38 @@ def test_print_is_real_size(app, window, profile, tmp_path):
     with pymupdf.open(out2) as d:
         assert abs(d[0].rect.width / 72 * 25.4 - 170) < 1.5
         assert abs(d[0].rect.height / 72 * 25.4 - 205) < 1.5
+
+
+def test_samples_dialog_disables_and_saves(app, window):
+    from konspekt.profile import Profile
+
+    dlg = gui.SamplesDialog(window, window.profile, "а")
+    buttons = dlg.buttons_for_current()
+    assert len(buttons) == len(window.profile.variants("а")) >= 2
+    sid = buttons[0].property("sample_id")
+    buttons[0].click()
+    assert dlg.changed() == 1
+    dlg.reject()  # отмена ничего не сохраняет
+    assert all(s.enabled for s in Profile.load(window.profile.root).samples if s.id == sid)
+
+
+def test_crossed_offer_and_samples_save(app, profile, tmp_path, monkeypatch):
+    from test_service import crossed_copy
+
+    from konspekt.profile import Profile
+
+    prof, sid = crossed_copy(profile, tmp_path)
+    monkeypatch.setattr(gui.QMessageBox, "question", lambda *a, **k: gui.QMessageBox.Yes)
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(tmp_path, qs)
+    assert not next(s for s in w.profile.samples if s.id == sid).enabled
+    assert not next(s for s in Profile.load(prof.root).samples if s.id == sid).enabled
+
+    dlg = gui.SamplesDialog(w, w.profile, "п")
+    b = next(b for b in dlg.buttons_for_current() if b.property("sample_id") == sid)
+    assert not b.isChecked()
+    b.click()  # вернуть образец
+    dlg._save()
+    assert next(s for s in Profile.load(prof.root).samples if s.id == sid).enabled
+    wait_idle(app, w)
+    w.close()

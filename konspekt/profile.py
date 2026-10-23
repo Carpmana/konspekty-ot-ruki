@@ -33,6 +33,10 @@ FORMAT_VERSION = 1
 DESCENDERS = set("дзруфцщ" + "gjpqy" + ",;")
 BASELINE_FIX_MM = 2.5
 
+# Зачёркнутый образец: чернил в разы больше, чем у других вариантов того же
+# символа. У живых вариантов разброс до ~1.7 раза.
+CROSSED_INK_RATIO = 2.2
+
 # Буквы без выносных элементов: по ним меряем высоту строчных.
 XHEIGHT_LETTERS = set("аве иклмнопстхчшьэя".replace(" ", "") + "acemnorsuvwxz")
 
@@ -190,6 +194,23 @@ class Profile:
         sw = [s.stroke_px for s in self.samples if s.enabled and s.stroke_px > 0]
         if sw:
             self.params.stroke_mm = round(px_to_mm(float(np.median(sw)), SAMPLE_DPI), 3)
+
+    def find_crossed(self) -> list[GlyphSample]:
+        """Включённые образцы, похожие на зачёркнутые: чернил намного больше,
+        чем у остальных вариантов того же символа. Нужно хотя бы 3 варианта,
+        иначе сравнивать не с чем."""
+        groups: dict[tuple[str, str], list[GlyphSample]] = {}
+        for s in self.samples:
+            if s.enabled:
+                groups.setdefault((s.text, s.style), []).append(s)
+        out = []
+        for group in groups.values():
+            if len(group) < 3:
+                continue
+            ink = [float(self.image(s).sum()) for s in group]
+            med = float(np.median(ink))
+            out += [s for s, v in zip(group, ink) if med > 0 and v > CROSSED_INK_RATIO * med]
+        return out
 
     def cluster_size_ok(self, s: GlyphSample) -> bool:
         """Образец слова, размер которого не удалось надёжно оценить, лучше не
