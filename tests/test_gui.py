@@ -253,3 +253,46 @@ def test_insert_helpers(app, window):
     window.fix_slider.setValue(4)
     o = window.options()
     assert o.tiredness == 0.5 and abs(o.corrections - 0.02) < 1e-9
+
+
+def test_letter_editor_delete_and_size(app, window, tmp_path):
+    import shutil
+
+    from konspekt.profile import Profile
+
+    root = tmp_path / "Тест"
+    shutil.copytree(window.profile.root, root)
+    prof = Profile.load(root)
+    dlg = gui.SamplesDialog(window, prof, "о")
+    n = len(dlg.buttons_for_current())
+    victim = dlg.buttons_for_current()[0].property("sample_id")
+    dlg.delete_sample(victim)
+    assert len(dlg.buttons_for_current()) == n - 1
+    dlg.scale_slider.setValue(120)
+    dlg.raise_spin.setValue(-0.4)
+    spin = next(w for w in dlg.grid_box.findChildren(gui.QSpinBox) if w.property("scale_for"))
+    spin.setValue(90)
+    dlg._render_preview()
+    assert dlg.preview.pixmap() is not None and not dlg.preview.pixmap().isNull()
+    assert dlg.changed() == 3
+    # Отмена: профиль на диске и в памяти не меняется
+    dlg.reject()
+    assert victim in {s.id for s in prof.samples} and not prof.letter_adjust
+    assert victim in {s.id for s in Profile.load(root).samples}
+
+    dlg = gui.SamplesDialog(window, prof, "о")
+    dlg.delete_sample(victim)
+    dlg.scale_slider.setValue(120)
+    dlg._save()
+    again = Profile.load(root)
+    assert victim not in {s.id for s in again.samples}
+    assert not (root / next(s for s in window.profile.samples if s.id == victim).file).exists()
+    assert again.letter_scale("о") == 1.2
+
+
+def test_live_edge_slider(app, window):
+    assert window.options().live_edge == 1.0  # по умолчанию край живой
+    window.edge_slider.setValue(0)
+    assert window.options().live_edge == 0.0
+    window.flip_back.setChecked(True)
+    assert window.options().flip_back

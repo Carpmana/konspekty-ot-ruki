@@ -62,3 +62,28 @@ def test_cli_skips_reimport(tmp_path, filled_photos, capsys):
     assert main(args) == 0
     assert "уже импортирован" in capsys.readouterr().out
     assert len(Profile.load(tmp_path / "Почерк").samples) == n
+
+
+def test_letter_adjust_saved_and_deleted_sample(profile, tmp_path):
+    import shutil
+
+    from konspekt.profile import Profile
+
+    shutil.copytree(profile.root, tmp_path / "p")
+    prof = Profile.load(tmp_path / "p")
+    prof.set_letter_adjust("д", scale=0.8, raise_mm=-0.5)
+    prof.set_letter_adjust("а", scale=5.0)  # за пределами — обрезается
+    victim = prof.variants("о")[0]
+    prof.set_sample_scale(victim.id, 1.2)
+    prof.save()
+    p2 = Profile.load(tmp_path / "p")
+    assert p2.letter_scale("д") == 0.8 and p2.letter_raise_mm("д") == -0.5
+    assert p2.letter_scale("а") == 1.8
+    assert p2.user_scale(victim) == pytest.approx(1.2)
+    p2.set_letter_adjust("д", scale=1.0, raise_mm=0.0)
+    assert "д" not in p2.letter_adjust
+    p2.remove(victim.id)
+    p2.save()
+    p3 = Profile.load(tmp_path / "p")
+    assert victim.id not in {s.id for s in p3.samples} and victim.id not in p3.variant_scale
+    assert not (tmp_path / "p" / victim.file).exists()

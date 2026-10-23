@@ -247,3 +247,37 @@ def test_docx_text_and_helpers(tmp_path):
     assert sv.date_words(datetime.date(2026, 5, 30)) == "Тридцатое мая"
     assert sv.next_question_number("1. a\nтекст\n2) b\n") == 3
     assert sv.next_question_number("") == 1
+
+
+def test_spread_printer_offset_does_not_cut_at_fold(profile):
+    """Сдвиг под принтер двигает всю сторону двойного листка. Раньше каждая
+    страница сдвигалась отдельно, и у правой страницы начало строк обрезалось
+    по линии сгиба."""
+    import numpy as np
+
+    def ink(o):
+        r = sv.render_text(TEXT, profile, o, dpi=60, for_print=True)
+        return r, 255.0 - np.asarray(r.images[0], np.float32)
+
+    base = dict(page="notebook", spread=True, real_paper=True)
+    r0, a0 = ink(sv.Options(**base))
+    r1, a1 = ink(sv.Options(**base, offset_x_mm=-3.0))
+    assert abs(a1.sum() - a0.sum()) < 0.002 * a0.sum()  # ничего не потеряно
+    dx = round(3.0 * 60 / 25.4)
+    w = a0.shape[1]
+    assert np.allclose(a1[:, : w - dx], a0[:, dx:])  # вся сторона сдвинута целиком
+
+
+def test_spread_flip_back_rotates_inner_side(profile):
+    import numpy as np
+
+    text = "\n".join([TEXT] * 6)
+    base = dict(page="notebook", spread=True, real_paper=True, offset_y_mm=2.0)
+    plain = sv.render_text(text, profile, sv.Options(**base), dpi=40, for_print=True)
+    flipped = sv.render_text(text, profile, sv.Options(**base, flip_back=True), dpi=40, for_print=True)
+    assert np.array_equal(np.asarray(plain.images[0]), np.asarray(flipped.images[0]))
+    # Оборот повёрнут, а сдвиг принтера тот же (вниз), а не перевёрнутый.
+    a, b = (255 - np.asarray(im.images[1].convert("L"), np.int32) for im in (plain, flipped))
+    assert not np.array_equal(a, b)
+    dy = round(2.0 * 40 / 25.4)
+    assert b[:dy].sum() == 0 and a[:dy].sum() == 0

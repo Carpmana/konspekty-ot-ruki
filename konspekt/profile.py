@@ -39,6 +39,10 @@ DRAWN_SOURCE = "нарисовано в программе"
 # символа. У живых вариантов разброс до ~1.7 раза.
 CROSSED_INK_RATIO = 2.2
 
+# Пределы ручной подстройки в «Редакторе букв».
+SCALE_LIMITS = (0.5, 1.8)
+RAISE_LIMITS_MM = (-3.0, 3.0)
+
 # Буквы без выносных элементов: по ним меряем высоту строчных.
 XHEIGHT_LETTERS = set("аве иклмнопстхчшьэя".replace(" ", "") + "acemnorsuvwxz")
 
@@ -101,6 +105,10 @@ class Profile:
     samples: list[GlyphSample] = field(default_factory=list)
     created: str = ""
     imported: list[str] = field(default_factory=list)  # sha256 импортированных файлов
+    # Ручная подстройка из «Редактора букв». Хранится отдельно от образцов,
+    # чтобы профиль открывался и прежними версиями программы.
+    letter_adjust: dict[str, dict[str, float]] = field(default_factory=dict)  # текст → {"scale", "raise_mm"}
+    variant_scale: dict[str, float] = field(default_factory=dict)  # id образца → множитель размера
     _cache: dict = field(default_factory=dict, repr=False)
 
     # ---------- хранение ----------
@@ -126,7 +134,9 @@ class Profile:
             raise ValueError(f"Неподдерживаемая версия профиля: {d.get('format')}")
         params = HandParams(**{**d["params"], "ink_color": tuple(d["params"]["ink_color"])})
         return Profile(root, d["name"], params, [GlyphSample.from_dict(s) for s in d["samples"]],
-                       d.get("created", ""), list(d.get("imported", [])))
+                       d.get("created", ""), list(d.get("imported", [])),
+                       {k: dict(v) for k, v in d.get("letter_adjust", {}).items()},
+                       dict(d.get("variant_scale", {})))
 
     def save(self) -> None:
         d = {
@@ -136,6 +146,8 @@ class Profile:
             "params": asdict(self.params),
             "samples": [asdict(s) for s in self.samples],
             "imported": self.imported,
+            "letter_adjust": self.letter_adjust,
+            "variant_scale": self.variant_scale,
         }
         tmp = self.root / (PROFILE_FILE + ".tmp")
         tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -177,13 +189,51 @@ class Profile:
         self.measure()
         return s
 
-    def remove(self, sample_id: str) -> None:
-        """Удаляет образец вместе с картинкой (для нарисованных: «переделать»)."""
+    def remove(self, sample_id: str, measure: bool = True) -> None:
+        """Удаляет образец вместе с картинкой: неудачный вариант или «переделать»."""
         s = next(x for x in self.samples if x.id == sample_id)
         self.samples.remove(s)
-        self._cache.pop(sample_id, None)
+        for key in (sample_id, f"{sample_id}:norm"):
+            self._cache.pop(key, None)
+        self.variant_scale.pop(sample_id, None)
         (self.root / s.file).unlink(missing_ok=True)
-        self.measure()
+        if measure:
+            self.measure()
+
+    # ---------- ручная подстройка размеров ----------
+
+    def letter_scale(self, text: str) -> float:
+        return float(self.letter_adjust.get(text, {}).get("scale", 1.0))
+
+    def letter_raise_mm(self, text: str) -> float:
+        """На сколько мм поднять букву над строкой (минус — опустить)."""
+        return float(self.letter_adjust.get(text, {}).get("raise_mm", 0.0))
+
+    def set_letter_adjust(self, text: str, scale: float | None = None, raise_mm: float | None = None) -> None:
+        a = dict(self.letter_adjust.get(text, {}))
+        if scale is not None:
+            a["scale"] = round(float(np.clip(scale, *SCALE_LIMITS)), 3)
+        if raise_mm is not None:
+            a["raise_mm"] = round(float(np.clip(raise_mm, *RAISE_LIMITS_MM)), 2)
+        a = {k: v for k, v in a.items() if v != {"scale": 1.0, "raise_mm": 0.0}[k]}
+        if a:
+            self.letter_adjust[text] = a
+        else:
+            self.letter_adjust.pop(text, None)
+
+    def sample_scale(self, s: GlyphSample) -> float:
+        return float(self.variant_scale.get(s.id, 1.0))
+
+    def set_sample_scale(self, sample_id: str, scale: float) -> None:
+        k = round(float(np.clip(scale, *SCALE_LIMITS)), 3)
+        if k == 1.0:
+            self.variant_scale.pop(sample_id, None)
+        else:
+            self.variant_scale[sample_id] = k
+
+    def user_scale(self, s: GlyphSample) -> float:
+        """Итоговый ручной множитель: вся буква × этот вариант."""
+        return self.letter_scale(s.text) * self.sample_scale(s)
 
     def is_imported(self, path: str | Path) -> bool:
         return file_sha256(path) in self.imported

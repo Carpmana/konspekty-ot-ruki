@@ -17,7 +17,7 @@ from .charset import BODY, HEADING
 from .profile import SAMPLE_DPI, GlyphSample, Profile, stroke_width_px
 from .units import A4_MM, A5_MM, mm_to_px, px_to_mm
 from .shape import ROW_MM, band_profile, edges, entry_point, exit_point, optical_x
-from .variation import AR1, SmoothNoise, VariantPicker
+from .variation import AR1, LeftEdge, SmoothNoise, VariantPicker
 
 FALLBACK_FONT = Path(__file__).parent / "assets" / "DejaVuSans.ttf"
 TIGHT_PUNCT = set(".,:;!?»)")
@@ -89,6 +89,7 @@ class Settings:
     highlight_missing: bool = False
     tiredness: float = 0.0  # 0–1: к концу конспекта почерк крупнее, размашистее и небрежнее
     corrections: float = 0.0  # доля слов, перед которыми пишется и зачёркивается ошибка
+    live_edge: float = 1.0  # 0–2: насколько гуляет начало строк у левого края (0 — почти ровно)
 
     @property
     def page_mm(self) -> tuple[float, float]:
@@ -206,7 +207,7 @@ class Typesetter:
         self.xh_mm = xh
         self._shapes: dict = {}
         self.line_slope = AR1(self.rng, settings.neatness * self.hp.line_slope_jitter_deg, keep=0.6)
-        self.line_start = AR1(self.rng, 0.7 * settings.neatness, keep=0.7)
+        self.edge = LeftEdge(np.random.default_rng((settings.seed, 11)), settings.live_edge * settings.neatness)
         self.base_scale_ratio = xh / self.hp.x_height_mm
         self.base_scale = _mm_per_px(self.base_scale_ratio)
         self.word_shear = AR1(self.rng, 0.025)
@@ -306,8 +307,9 @@ class Typesetter:
         while i < len(word):
             mark = marks[i]
             sample, text, fb = self._choose(word, i, style, plain=not any(marks))
-            sc = self.base_scale * self.p.size_factor(sample) * word_scale * rng.normal(1.0, 0.025 * neat)
-            dy = rng.normal(0, 0.12 * neat)
+            sc = (self.base_scale * self.p.size_factor(sample) * self.p.user_scale(sample) * word_scale
+                  * rng.normal(1.0, 0.025 * neat))
+            dy = rng.normal(0, 0.12 * neat) - self.p.letter_raise_mm(text) * self.base_scale_ratio
             if mark:
                 sc *= SCRIPT_SCALE
                 dy += -0.8 * xh if mark == "sup" else 0.35 * xh
@@ -358,6 +360,12 @@ class Typesetter:
         left = self.s.margin_left_mm + (2.0 if self.s.margin_line else 0.0)
         right = W - self.s.margin_right_mm
         overflow = 2.5  # люди иногда немного заходят за край
+        # Насколько строка может начаться левее обычного: не заезжая на красное
+        # поле, а без поля — не ближе 3 мм к краю листа (там принтер не печатает).
+        if self.s.margin_line:
+            left_room = left - self.s.margin_left_mm - 0.4
+        else:
+            left_room = max(0.0, left - 3.0)
         pitch = self.s.line_pitch_mm
         g = self.s.grid_mm
         first_base = math.ceil((self.s.margin_top_mm + pitch) / g) * g
@@ -384,7 +392,7 @@ class Typesetter:
                 # заметнее уводит строку вверх.
                 slope = math.tan(math.radians(self.hp.line_slope_deg + self.line_slope.next() - 1.2 * tired))
                 wobble = SmoothNoise(self.rng, self.hp.baseline_wobble_mm * neat * self.fatigue)
-                start_jitter = self.line_start.next()
+                start_jitter = self.edge.next(left_room)
                 base_y += self.rng.normal(0, 0.3 * neat)
                 shift = start_jitter
                 used = cur[-1][0] + cur[-1][1].width - cur[0][0]
