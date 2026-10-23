@@ -18,7 +18,7 @@
 
 ## Скачать
 
-**[Скачать Konspekt-windows.zip](https://github.com/Carpmana/konspekty./releases/latest/download/Konspekt-windows.zip)**
+**[Скачать Konspekt-windows.zip](https://github.com/Carpmana/konspekty-ot-ruki/releases/latest/download/Konspekt-windows.zip)**
 (Windows 10/11, около 150 МБ)
 
 1. Распакуйте архив в любую папку.
@@ -27,7 +27,7 @@
    «Подробнее», затем «Выполнить в любом случае». Так бывает с любой
    программой без платной цифровой подписи.
 
-Все версии: [Releases](https://github.com/Carpmana/konspekty./releases).
+Все версии: [Releases](https://github.com/Carpmana/konspekty-ot-ruki/releases).
 
 ## Как начать
 
