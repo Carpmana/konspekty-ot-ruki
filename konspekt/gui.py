@@ -13,7 +13,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, QRunnable, QSettings, QSizeF, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QProcess, QRunnable, QSettings, QSizeF, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPen, QKeySequence, QPageLayout, QPageSize, QPainter, QPixmap,
 )
@@ -792,8 +792,10 @@ class DrawDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, profiles_dir: str | Path | None = None, settings: QSettings | None = None):
+    def __init__(self, profiles_dir: str | Path | None = None, settings: QSettings | None = None,
+                 blank: bool = False):
         super().__init__()
+        self.blank = blank  # второе окно: начинается с пустого текста и не затирает текст главного
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 820)
         self.qs = settings or QSettings("Konspekt", "Konspekt")
@@ -1128,6 +1130,9 @@ class MainWindow(QMainWindow):
             return a
 
         m = self.menuBar().addMenu("Файл")
+        act(m, "Новый конспект", self.new_text, QKeySequence.New)
+        act(m, "Новое окно", self.new_window, "Ctrl+Alt+N")
+        m.addSeparator()
         act(m, "Открыть текст…", self.open_text, QKeySequence.Open)
         act(m, "Сохранить PDF…", self.save_pdf, QKeySequence.Save)
         act(m, "Печать…", self.print_pages, QKeySequence.Print)
@@ -1157,7 +1162,8 @@ class MainWindow(QMainWindow):
 
     def _restore(self):
         q = self.qs
-        self.text_edit.setPlainText(q.value("text", ""))
+        if not self.blank:
+            self.text_edit.setPlainText(q.value("text", ""))
         self.page_box.setCurrentIndex(max(0, self.page_box.findData(q.value("page", "notebook"))))
         self.paper_box.setCurrentIndex(max(0, self.paper_box.findData(q.value("paper", "grid"))))
         margins = q.value("margins", "")
@@ -1182,7 +1188,8 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         q = self.qs
-        q.setValue("text", self.text_edit.toPlainText())
+        if not self.blank:
+            q.setValue("text", self.text_edit.toPlainText())
         q.setValue("paper", self.paper_box.currentData())
         q.setValue("page", self.page_box.currentData())
         q.setValue("margins", self.margin_box.currentData())
@@ -1326,6 +1333,26 @@ class MainWindow(QMainWindow):
         return True
 
     # ---------- текст ----------
+
+    def new_text(self):
+        """Пустое поле; прежний текст возвращается через Ctrl+Z."""
+        c = self.text_edit.textCursor()
+        c.select(c.SelectionType.Document)
+        c.removeSelectedText()
+        self.text_edit.setTextCursor(c)
+        self.text_edit.setFocus()
+
+    def new_window(self) -> bool:
+        """Ещё одно окно программы для второго конспекта — отдельный процесс."""
+        if getattr(sys, "frozen", False):
+            program, args = sys.executable, ["--new"]
+        else:
+            program, args = sys.executable, ["-m", "konspekt.gui", "--new"]
+        res = QProcess.startDetached(program, args)
+        ok = res[0] if isinstance(res, tuple) else bool(res)
+        if not ok:
+            QMessageBox.warning(self, APP_NAME, "Не удалось открыть новое окно.")
+        return ok
 
     def open_text(self):
         path, _ = QFileDialog.getOpenFileName(self, "Текст конспекта", "",
@@ -1619,7 +1646,10 @@ def main(argv: list[str] | None = None) -> int:
             pass
     if os.environ.get("KONSPEKT_SMOKE"):
         return _smoke(app)
-    w = MainWindow(os.environ.get("KONSPEKT_PROFILES"))
+    args = sys.argv if argv is None else argv
+    w = MainWindow(os.environ.get("KONSPEKT_PROFILES"), blank="--new" in args)
+    if w.blank:
+        w.setWindowTitle(f"{APP_NAME} — новый конспект")
     w.show()
     return app.exec()
 

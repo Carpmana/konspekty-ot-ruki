@@ -296,3 +296,26 @@ def test_live_edge_slider(app, window):
     assert window.options().live_edge == 0.0
     window.flip_back.setChecked(True)
     assert window.options().flip_back
+
+
+def test_new_text_and_blank_window(app, window, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+
+    window.text_edit.setPlainText("старый текст")
+    window.new_text()
+    assert window.text_edit.toPlainText() == ""
+    window.text_edit.undo()
+    assert window.text_edit.toPlainText() == "старый текст"
+
+    qs = QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat)
+    qs.setValue("text", "конспект главного окна")
+    second = gui.MainWindow(tmp_path / "profiles", qs, blank=True)
+    assert second.text_edit.toPlainText() == ""
+    second.text_edit.setPlainText("второй")
+    second._save_settings()
+    assert qs.value("text") == "конспект главного окна"  # второе окно не затирает текст первого
+    second.close()
+
+    calls = []
+    monkeypatch.setattr(gui.QProcess, "startDetached", lambda prog, args: calls.append(args) or (True, 1))
+    assert window.new_window() and calls[-1][-1] == "--new"
