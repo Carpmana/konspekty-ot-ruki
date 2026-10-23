@@ -107,7 +107,7 @@ class ImportResult:
                  f"Добавлено образцов: {self.added} (всего в профиле: {self.total_samples})"]
         if self.crossed:
             lines.append(f"Отключены образцы, похожие на зачёркнутые: {' '.join(self.crossed)}. "
-                         "Вернуть их можно в меню Почерк → Образцы букв.")
+                         "Вернуть их можно в меню Почерк → Редактор букв.")
         if self.skipped:
             lines.append("Пропущены, уже импортированы раньше:")
             lines += [f"  • {Path(f).name}" for f in self.skipped]
@@ -140,7 +140,7 @@ def import_scans(profile_dir: str | Path, name: str, files: list[str | Path]) ->
 def disable_crossed(prof: Profile, among: list[GlyphSample] | None = None, save: bool = True) -> list[GlyphSample]:
     """Отключает образцы, похожие на зачёркнутые (при импорте — только среди
     новых, чтобы не трогать то, что пользователь вернул сам). Они остаются в
-    профиле, и их можно вернуть в окне «Образцы букв»."""
+    профиле, и их можно вернуть в окне «Редактор букв»."""
     crossed = prof.find_crossed()
     if among is not None:
         ids = {s.id for s in among}
@@ -241,6 +241,8 @@ class Options:
     nested: bool = True  # листки вкладываются друг в друга, как в тетради (иначе — стопкой)
     tiredness: float = 0.0  # 0–1: рука устаёт к концу конспекта
     corrections: float = 0.0  # доля слов с зачёркнутой опиской перед ними
+    live_edge: float = 1.0  # 0–2: насколько гуляет начало строк у левого края
+    flip_back: bool = False  # двойной листок: внутренняя сторона печатается повёрнутой на 180°
 
     @property
     def fmt(self) -> PageFormat:
@@ -270,7 +272,7 @@ class Options:
                             margin_line=mode != "none",
                             margin_left_mm=f.outer_mm if mode != "none" else f.inner_mm,
                             margin_right_mm=f.inner_mm,
-                            tiredness=self.tiredness, corrections=self.corrections)
+                            tiredness=self.tiredness, corrections=self.corrections, live_edge=self.live_edge)
 
 
 @dataclass
@@ -307,16 +309,23 @@ def _mirror_page(page: lay.Page, dx: float) -> lay.Page:
     return replace(page, glyphs=glyphs, connectors=conns, lines=lines)
 
 
-def _ink_only(im: Image.Image, opts: Options, dpi: int) -> Image.Image:
-    """Белый фон вместо бумаги и сдвиг под принтер: клетки уже есть на листке."""
+def _ink_only(im: Image.Image) -> Image.Image:
+    """Белый фон вместо бумаги: клетки уже есть на листке."""
     a = np.asarray(im, np.float32) * (255.0 / PAPER_COLOR)
-    out = Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), "RGB")
+    return Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), "RGB")
+
+
+def printer_shift(im: Image.Image, opts: Options, dpi: int) -> Image.Image:
+    """Сдвиг под принтер. Применяется к тому, что целиком ложится в лоток:
+    к странице или ко всей стороне двойного листка. Если сдвигать каждую
+    страницу разворота по отдельности, правая страница обрезается по линии
+    сгиба — буквы в начале строк теряют пару миллиметров."""
     dx, dy = round(mm_to_px(opts.offset_x_mm, dpi)), round(mm_to_px(opts.offset_y_mm, dpi))
-    if dx or dy:
-        moved = Image.new("RGB", out.size, (255, 255, 255))
-        moved.paste(out, (dx, dy))
-        out = moved
-    return out
+    if not (dx or dy):
+        return im
+    moved = Image.new("RGB", im.size, (255, 255, 255))
+    moved.paste(im, (dx, dy))
+    return moved
 
 
 def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
@@ -344,9 +353,16 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
         if ink_only:
             ps = replace(ps, paper="blank", paper_texture=False)
         im = render_page(page, prof, ps, i)
-        images.append(_ink_only(im, opts, dpi) if ink_only else im)
+        images.append(_ink_only(im) if ink_only else im)
     r = Rendered(images, set(layout.missing), dpi, f.size_mm)
-    return to_spreads(r, len(layout.pages), opts.nested) if opts.use_spread else r
+    if opts.use_spread:
+        r = to_spreads(r, len(layout.pages), opts.nested)
+    if ink_only:
+        # Сдвиг принтера одинаков для каждой стороны в лотке, поэтому оборот
+        # сначала поворачиваем, а потом сдвигаем.
+        r.images = [printer_shift(im.rotate(180) if r.is_spread and k % 2 and opts.flip_back else im, opts, dpi)
+                    for k, im in enumerate(r.images)]
+    return r
 
 
 def sheet_pages(sheets: int, nested: bool) -> list[tuple[tuple[int, int], tuple[int, int]]]:

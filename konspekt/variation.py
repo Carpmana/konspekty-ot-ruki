@@ -45,3 +45,32 @@ class VariantPicker:
         choice = fresh[int(self.rng.integers(len(fresh)))]
         recent.append(choice.id)
         return choice
+
+
+class LeftEdge:
+    """Где человек начинает очередную строку у левого края.
+
+    Никто не ставит ручку каждый раз в одну и ту же клетку. Начало строки
+    медленно «плывёт» на протяжении страницы (рука смещается вместе с
+    тетрадью), от строки к строке немного дрожит, а изредка строка
+    начинается заметно правее. Левее красного поля люди почти не заходят,
+    поэтому отступ влево ограничен."""
+
+    def __init__(self, rng: np.random.Generator, amount: float = 1.0):
+        self.rng = rng
+        self.amount = max(0.0, amount)
+        self.drift = SmoothNoise(rng, 2.6 * self.amount, wavelengths=(23.0, 9.0, 4.0))
+        self.jitter = AR1(rng, 1.0 * self.amount, keep=0.45)
+        self.line = 0
+
+    def next(self, left_room: float = 99.0) -> float:
+        """Сдвиг начала следующей строки, мм (плюс — правее)."""
+        a = self.amount
+        off = self.drift(float(self.line)) + self.jitter.next()
+        if a > 0 and self.rng.random() < 0.07:
+            off += self.rng.uniform(1.5, 3.5) * min(a, 1.5)  # начал строку с запасом
+        self.line += 1
+        if off < 0:
+            # Влево рука уходит неохотно: сжимаем и не пускаем за поле.
+            off = max(0.6 * off, -left_room)
+        return float(off)

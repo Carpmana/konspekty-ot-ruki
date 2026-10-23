@@ -27,7 +27,9 @@ from PySide6.QtWidgets import (
 
 from . import service as sv
 from .charset import DIGITS, PUNCT, RU_LOWER, RU_UPPER
-from .profile import DRAWN_SOURCE, GlyphSample, Profile
+from .layout import Settings as LayoutSettings, typeset
+from .profile import DRAWN_SOURCE, RAISE_LIMITS_MM, SCALE_LIMITS, GlyphSample, Profile
+from .render import render_page
 from .template import TEMPLATE_SETS, save_template_pdf
 
 APP_NAME = "Конспекты от руки"
@@ -291,32 +293,41 @@ def sample_pixmap(prof: Profile, s: GlyphSample, height: int = 90) -> QPixmap:
 
 
 class SamplesDialog(QDialog):
-    """Все варианты одного символа. Щелчок по образцу отключает его (рамка
-    становится красной пунктирной) или возвращает обратно."""
+    """Редактор букв: все варианты одного символа и их размеры.
+
+    Щелчок по образцу отключает его (рамка становится красной пунктирной) или
+    возвращает. «Удалить» убирает неудачный вариант совсем. Ползунки меняют
+    размер и высоту буквы в строке, у каждого варианта есть свой размер.
+    Снизу — строка, написанная с учётом всех правок. Всё применяется только
+    по «Сохранить»."""
+
+    PREVIEW_DPI = 150
 
     def __init__(self, parent, prof: Profile, start: str = ""):
         super().__init__(parent)
         self.prof = prof
         self.enabled = {s.id: s.enabled for s in prof.samples}
+        self.deleted: set[str] = set()
+        self.adjust = {k: dict(v) for k, v in prof.letter_adjust.items()}
+        self.vscale = dict(prof.variant_scale)
+        self._saved_state = ({s.id: s.enabled for s in prof.samples}, {k: dict(v) for k, v in self.adjust.items()},
+                             dict(self.vscale))
         self.suspect = {s.id for s in prof.find_crossed()}
-        self.setWindowTitle(f"Образцы букв — {prof.name}")
-        self.resize(720, 520)
+        self.setWindowTitle(f"Редактор букв — {prof.name}")
+        self.resize(820, 680)
         lay = QVBoxLayout(self)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Символ:"))
+        row.addWidget(QLabel("Буква:"))
         self.text_box = QComboBox()
-        texts = sorted({s.text for s in prof.samples}, key=lambda t: (len(t), t.lower(), t))
-        for t in texts:
-            n = sum(1 for s in prof.samples if s.text == t)
-            self.text_box.addItem(f"{t}   ({n})", t)
         row.addWidget(self.text_box, 1)
         self.crossed_btn = QPushButton("Отключить похожие на зачёркнутые")
         self.crossed_btn.clicked.connect(self._disable_suspects)
         row.addWidget(self.crossed_btn)
         lay.addLayout(row)
-        lay.addWidget(QLabel("Щёлкните по неудачному или зачёркнутому образцу, чтобы программа его не брала. "
-                             "Щёлкните ещё раз, чтобы вернуть.", objectName="hint", wordWrap=True))
+        lay.addWidget(QLabel("Щелчок по образцу отключает его (программа его не берёт), второй щелчок "
+                             "возвращает. «Удалить» убирает неудачный вариант совсем. Процент под образцом — "
+                             "размер именно этого варианта.", objectName="hint", wordWrap=True))
 
         self.grid_box = QWidget()
         self.grid = QGridLayout(self.grid_box)
@@ -325,6 +336,57 @@ class SamplesDialog(QDialog):
         area.setWidgetResizable(True)
         area.setWidget(self.grid_box)
         lay.addWidget(area, 1)
+        drow = QHBoxLayout()
+        self.deleted_label = QLabel(objectName="hint")
+        self.undelete_btn = QPushButton("Вернуть удалённые")
+        self.undelete_btn.clicked.connect(self._undelete)
+        drow.addWidget(self.deleted_label, 1)
+        drow.addWidget(self.undelete_btn)
+        lay.addLayout(drow)
+
+        size_box = QFrame(objectName="card")
+        sg = QGridLayout(size_box)
+        sg.setContentsMargins(12, 8, 12, 8)
+        self.size_title = QLabel(objectName="cardTitle")
+        sg.addWidget(self.size_title, 0, 0, 1, 3)
+        sg.addWidget(QLabel("Размер"), 1, 0)
+        self.scale_slider = QSlider(Qt.Horizontal)
+        lo, hi = (round(100 * v) for v in SCALE_LIMITS)
+        self.scale_slider.setRange(lo, hi)
+        self.scale_slider.setToolTip("Во сколько раз крупнее или мельче писать эту букву, 100% — как в образцах")
+        sg.addWidget(self.scale_slider, 1, 1)
+        self.scale_label = QLabel()
+        self.scale_label.setMinimumWidth(48)
+        sg.addWidget(self.scale_label, 1, 2)
+        sg.addWidget(QLabel("Выше / ниже"), 2, 0)
+        self.raise_spin = QDoubleSpinBox()
+        self.raise_spin.setRange(*RAISE_LIMITS_MM)
+        self.raise_spin.setSingleStep(0.1)
+        self.raise_spin.setDecimals(1)
+        self.raise_spin.setSuffix(" мм")
+        self.raise_spin.setToolTip("Плюс — буква стоит выше строки, минус — ниже. Для букв, которые «прыгают»")
+        sg.addWidget(self.raise_spin, 2, 1)
+        reset = QPushButton("Сбросить")
+        reset.setToolTip("Вернуть размер и высоту буквы и всех её вариантов как в образцах")
+        reset.clicked.connect(self._reset_letter)
+        sg.addWidget(reset, 2, 2)
+        lay.addWidget(size_box)
+
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("Проверка:"))
+        self.check_edit = QLineEdit()
+        self.check_edit.setToolTip("Слова, на которых видно, как буква смотрится в строке. Можно написать свои")
+        prow.addWidget(self.check_edit, 1)
+        lay.addLayout(prow)
+        self.preview = QLabel()
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumHeight(110)
+        self.preview.setStyleSheet("background: #ffffff; border: 1px solid #e3e6ee; border-radius: 8px;")
+        lay.addWidget(self.preview)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(150)
+        self.preview_timer.timeout.connect(self._render_preview)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Save).setText("Сохранить")
@@ -333,22 +395,50 @@ class SamplesDialog(QDialog):
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
+        self._fill_texts()
         first_suspect = next((s.text for s in prof.samples if s.id in self.suspect), "")
         i = self.text_box.findData(start or first_suspect)
         self.text_box.setCurrentIndex(max(i, 0))
         self.text_box.currentIndexChanged.connect(self._show)
+        self.scale_slider.valueChanged.connect(self._letter_changed)
+        self.raise_spin.valueChanged.connect(self._letter_changed)
+        self.check_edit.textEdited.connect(lambda *_: self.preview_timer.start())
         self._show()
 
+    # ---------- список букв ----------
+
+    def _fill_texts(self):
+        current = self.text_box.currentData()
+        texts = sorted({s.text for s in self.prof.samples}, key=lambda t: (len(t), t.lower(), t))
+        self.text_box.blockSignals(True)
+        self.text_box.clear()
+        for t in texts:
+            ids = [s.id for s in self.prof.samples if s.text == t and s.id not in self.deleted]
+            on = sum(1 for sid in ids if self.enabled[sid])
+            mark = "  • изменена" if t in self.adjust or any(sid in self.vscale for sid in ids) else ""
+            self.text_box.addItem(f"{t}   ({on} из {len(ids)}){mark}", t)
+        if current is not None:
+            self.text_box.setCurrentIndex(max(0, self.text_box.findData(current)))
+        self.text_box.blockSignals(False)
+
+    def current_text(self) -> str:
+        return self.text_box.currentData() or ""
+
     def buttons_for_current(self) -> list[QToolButton]:
-        return [self.grid.itemAt(i).widget() for i in range(self.grid.count())]
+        return [w for w in self.grid_box.findChildren(QToolButton) if w.property("sample_id")]
 
     def _show(self, *_):
         while self.grid.count():
             old = self.grid.takeAt(0).widget()
             old.setParent(None)
             old.deleteLater()
-        text = self.text_box.currentData()
-        for k, s in enumerate(s for s in self.prof.samples if s.text == text):
+        text = self.current_text()
+        found = [s for s in self.prof.samples if s.text == text and s.id not in self.deleted]
+        for k, s in enumerate(found):
+            tile = QWidget()
+            tl = QVBoxLayout(tile)
+            tl.setContentsMargins(0, 0, 0, 0)
+            tl.setSpacing(3)
             b = QToolButton(objectName="sample")
             b.setCheckable(True)
             b.setChecked(self.enabled[s.id])
@@ -360,8 +450,92 @@ class SamplesDialog(QDialog):
                 tip = "Похоже на зачёркнутый. " + tip
             b.setToolTip(tip)
             b.setProperty("sample_id", s.id)
-            b.toggled.connect(lambda on, sid=s.id: self.enabled.__setitem__(sid, on))
-            self.grid.addWidget(b, k // 5, k % 5)
+            b.toggled.connect(lambda on, sid=s.id: self._toggle(sid, on))
+            tl.addWidget(b, 0, Qt.AlignHCenter)
+            low = QHBoxLayout()
+            low.setSpacing(3)
+            sp = QSpinBox()
+            sp.setRange(*(round(100 * v) for v in SCALE_LIMITS))
+            sp.setSingleStep(5)
+            sp.setSuffix("%")
+            sp.setValue(round(100 * self.vscale.get(s.id, 1.0)))
+            sp.setToolTip("Размер этого варианта")
+            sp.setProperty("scale_for", s.id)
+            sp.valueChanged.connect(lambda v, sid=s.id: self._variant_scale(sid, v))
+            dl = QToolButton()
+            dl.setText("Удалить")
+            dl.setToolTip("Удалить этот вариант из почерка (после «Сохранить»)")
+            dl.setProperty("delete_for", s.id)
+            dl.clicked.connect(lambda _=False, sid=s.id: self.delete_sample(sid))
+            low.addWidget(sp)
+            low.addWidget(dl)
+            tl.addLayout(low)
+            self.grid.addWidget(tile, k // 4, k % 4)
+        a = self.adjust.get(text, {})
+        for w in (self.scale_slider, self.raise_spin):
+            w.blockSignals(True)
+        self.scale_slider.setValue(round(100 * a.get("scale", 1.0)))
+        self.raise_spin.setValue(a.get("raise_mm", 0.0))
+        for w in (self.scale_slider, self.raise_spin):
+            w.blockSignals(False)
+        self.scale_label.setText(f"{self.scale_slider.value()}%")
+        self.size_title.setText(f"Вся буква «{text}» в тексте")
+        n = len(self.deleted)
+        self.deleted_label.setText(f"Будет удалено вариантов: {n}" if n else "")
+        self.undelete_btn.setVisible(bool(n))
+        self.check_edit.setText(self._check_words(text))
+        self.preview_timer.start()
+
+    @staticmethod
+    def _check_words(text: str) -> str:
+        if len(text) > 1 or not text.isalpha():
+            return f"было {text} это"
+        if text.isupper():
+            return f"{text}ня и {text}ом"
+        return f"н{text}м {text}{text}о и {text}"
+
+    # ---------- правки ----------
+
+    def _toggle(self, sid: str, on: bool):
+        self.enabled[sid] = on
+        self.preview_timer.start()
+
+    def _variant_scale(self, sid: str, percent: int):
+        if percent == 100:
+            self.vscale.pop(sid, None)
+        else:
+            self.vscale[sid] = percent / 100
+        self.preview_timer.start()
+
+    def _letter_changed(self, *_):
+        text = self.current_text()
+        a = {"scale": self.scale_slider.value() / 100, "raise_mm": round(self.raise_spin.value(), 2)}
+        a = {k: v for k, v in a.items() if v != {"scale": 1.0, "raise_mm": 0.0}[k]}
+        if a:
+            self.adjust[text] = a
+        else:
+            self.adjust.pop(text, None)
+        self.scale_label.setText(f"{self.scale_slider.value()}%")
+        self.preview_timer.start()
+
+    def _reset_letter(self):
+        text = self.current_text()
+        self.adjust.pop(text, None)
+        for s in self.prof.samples:
+            if s.text == text:
+                self.vscale.pop(s.id, None)
+        self._fill_texts()
+        self._show()
+
+    def delete_sample(self, sid: str):
+        self.deleted.add(sid)
+        self._fill_texts()
+        self._show()
+
+    def _undelete(self):
+        self.deleted.clear()
+        self._fill_texts()
+        self._show()
 
     def _disable_suspects(self):
         for sid in self.suspect:
@@ -372,11 +546,52 @@ class SamplesDialog(QDialog):
                                 if n else "Зачёркнутых образцов не найдено.")
 
     def changed(self) -> int:
-        return sum(1 for s in self.prof.samples if s.enabled != self.enabled[s.id])
+        en, adj, vs = self._saved_state
+        n = sum(1 for sid, on in self.enabled.items() if sid not in self.deleted and en.get(sid) != on)
+        n += len(self.deleted)
+        n += sum(1 for k in set(adj) | set(self.adjust) if adj.get(k) != self.adjust.get(k))
+        n += sum(1 for k in set(vs) | set(self.vscale) if vs.get(k) != self.vscale.get(k))
+        return n
+
+    def _apply(self):
+        """Переносит правки в профиль (удалённые пока только отключены)."""
+        for s in self.prof.samples:
+            s.enabled = self.enabled[s.id] and s.id not in self.deleted
+        self.prof.letter_adjust = {k: dict(v) for k, v in self.adjust.items()}
+        self.prof.variant_scale = dict(self.vscale)
+
+    def _restore(self):
+        en, adj, vs = self._saved_state
+        for s in self.prof.samples:
+            s.enabled = en[s.id]
+        self.prof.letter_adjust = {k: dict(v) for k, v in adj.items()}
+        self.prof.variant_scale = dict(vs)
+
+    def _render_preview(self):
+        words = self.check_edit.text().strip()
+        if not words:
+            self.preview.clear()
+            return
+        self._apply()
+        try:
+            settings = LayoutSettings(page_size_mm=(120.0, 19.0), paper="grid", dpi=self.PREVIEW_DPI, margin_line=False,
+                                    margin_left_mm=4.0, margin_right_mm=4.0, margin_top_mm=0.0, indent_mm=0.0,
+                                    seed=5, live_edge=0.0, paper_texture=False)
+            layout = typeset(words, self.prof, settings)
+            im = render_page(layout.pages[0], self.prof, settings)
+        finally:
+            self._restore()
+        pm = QPixmap.fromImage(to_qimage(im))
+        self.preview.setPixmap(pm.scaledToWidth(min(pm.width() * 2, 760), Qt.SmoothTransformation))
+
+    def reject(self):
+        self._restore()
+        super().reject()
 
     def _save(self):
-        for s in self.prof.samples:
-            s.enabled = self.enabled[s.id]
+        self._apply()
+        for sid in self.deleted:
+            self.prof.remove(sid, measure=False)
         self.prof.measure()
         self.prof.save()
         self.accept()
@@ -664,8 +879,9 @@ class MainWindow(QMainWindow):
         row.addWidget(blank)
         sl.addLayout(row)
         row2 = QHBoxLayout()
-        samples = QPushButton("Образцы букв…")
-        samples.setToolTip("Посмотреть варианты каждой буквы и отключить неудачные или зачёркнутые (Ctrl+B)")
+        samples = QPushButton("Редактор букв…")
+        samples.setToolTip("Варианты каждой буквы: удалить или отключить неудачные, поменять размер "
+                           "и высоту буквы в строке (Ctrl+B)")
         samples.clicked.connect(self.edit_samples)
         draw = QPushButton("Нарисовать…")
         draw.setToolTip("Дописать варианты букв мышью или на тачпаде, удалить и переделать неудачные (Ctrl+D)")
@@ -720,6 +936,17 @@ class MainWindow(QMainWindow):
         fends.addStretch(1)
         fends.addWidget(QLabel("часто", objectName="hint"))
         sl.addLayout(fends)
+        self.edge_slider = QSlider(Qt.Horizontal)
+        self.edge_slider.setRange(0, 10)
+        self.edge_slider.setToolTip("Человек не начинает каждую строку в одной и той же клетке: начало строк "
+                                    "немного гуляет и плывёт по странице. 0 — почти ровный край")
+        sl.addWidget(QLabel("Живой левый край"))
+        sl.addWidget(self.edge_slider)
+        eends = QHBoxLayout()
+        eends.addWidget(QLabel("ровно", objectName="hint"))
+        eends.addStretch(1)
+        eends.addWidget(QLabel("свободно", objectName="hint"))
+        sl.addLayout(eends)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(0.0, 8.0)
         self.size_spin.setSingleStep(0.25)
@@ -856,6 +1083,7 @@ class MainWindow(QMainWindow):
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
+                    self.edge_slider.valueChanged,
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
             sig.connect(self.schedule_preview)
@@ -911,7 +1139,7 @@ class MainWindow(QMainWindow):
         act(m, "Сохранить основной бланк (PDF)…", lambda: self.save_template("main"))
         act(m, "Сохранить дополнительный бланк (PDF)…", lambda: self.save_template("extra"))
         act(m, "Что есть в профиле", self.show_coverage)
-        act(m, "Образцы букв…", self.edit_samples, "Ctrl+B")
+        act(m, "Редактор букв…", self.edit_samples, "Ctrl+B")
         act(m, "Нарисовать буквы…", self.draw_letters, "Ctrl+D")
         m.addSeparator()
         act(m, "Открыть папку профилей", self.open_profiles_dir)
@@ -941,6 +1169,7 @@ class MainWindow(QMainWindow):
         self.neat_slider.setValue(int(q.value("neatness10", 10)))
         self.tired_slider.setValue(int(q.value("tiredness10", 3)))
         self.fix_slider.setValue(int(q.value("corrections10", 0)))
+        self.edge_slider.setValue(int(q.value("live_edge10", 5)))
         self.size_spin.setValue(float(q.value("size_mm", 0.0)))
         self.pitch_spin.setValue(float(q.value("pitch_mm", 10.0)))
         self.real_paper.setChecked(q.value("real_paper", "false") in (True, "true"))
@@ -967,6 +1196,7 @@ class MainWindow(QMainWindow):
         q.setValue("neatness10", self.neat_slider.value())
         q.setValue("tiredness10", self.tired_slider.value())
         q.setValue("corrections10", self.fix_slider.value())
+        q.setValue("live_edge10", self.edge_slider.value())
         q.setValue("size_mm", self.size_spin.value())
         q.setValue("pitch_mm", self.pitch_spin.value())
         q.setValue("profile", self.profile_box.currentText())
@@ -985,7 +1215,8 @@ class MainWindow(QMainWindow):
                           real_paper=self.real_paper.isChecked(), offset_x_mm=self.off_x.value(),
                           offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
                           nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
-                          corrections=self.fix_slider.value() / 200)
+                          corrections=self.fix_slider.value() / 200, live_edge=self.edge_slider.value() / 5,
+                          flip_back=self.flip_back.isChecked())
 
     # ---------- профили ----------
 
@@ -1026,7 +1257,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self, APP_NAME,
             f"В почерке «{self.profile.name}» есть образцы, похожие на зачёркнутые: {letters}.\n\n"
-            "Отключить их, чтобы программа их не писала? Вернуть можно в «Образцы букв…».")
+            "Отключить их, чтобы программа их не писала? Вернуть можно в «Редакторе букв…».")
         if answer == QMessageBox.Yes:
             sv.disable_crossed(self.profile)
         else:
@@ -1291,7 +1522,7 @@ class MainWindow(QMainWindow):
                 return
             if inner is None:
                 continue
-            im = r.images[inner].rotate(180) if self.flip_back.isChecked() else r.images[inner]
+            im = r.images[inner]  # оборот уже повёрнут, если нужно (Options.flip_back)
             if not ask(head, f"Наружная сторона напечатана.\n\n"
                              "Дайте чернилам высохнуть, переверните этот же листок чистой стороной "
                              "и вставьте его снова тем же краем вперёд.\n\n"

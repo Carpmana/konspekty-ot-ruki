@@ -125,3 +125,39 @@ def test_numbered_and_right_aligned(profile):
     date = [g for g in page.glyphs if g.y < page.glyphs[-1].y - 3]
     assert min(g.x for g in date) > W / 2  # дата справа
     assert reconstruct_text(layout) == ["23.10", "Вопрос"]
+
+
+def _line_starts(layout):
+    starts = []
+    for p in layout.pages:
+        rows = {}
+        for g in p.glyphs:
+            rows.setdefault(round(g.y / 10), []).append(g.x)
+        starts += [min(v) for v in rows.values()]
+    starts = np.array(starts)
+    return starts[starts < starts.min() + 8]  # без красной строки абзаца
+
+
+def test_live_left_edge(profile):
+    text = " ".join(["Неожиданно длинное предложение с многочисленными переносами слов по слогам."] * 25)
+    s = dict(page_size_mm=(170.0, 205.0), margin_left_mm=20.0, margin_right_mm=4.0)
+    flat = _line_starts(typeset(text, profile, Settings(seed=2, live_edge=0.0, **s)))
+    live = _line_starts(typeset(text, profile, Settings(seed=2, live_edge=1.0, **s)))
+    assert flat.std() < 0.05 and live.std() > 0.8
+    # Начало строки гуляет, но не заезжает за красное поле.
+    assert live.min() >= 20.0
+
+
+def test_letter_size_editor_changes_layout(profile, tmp_path):
+    import shutil
+
+    from konspekt.profile import Profile
+
+    shutil.copytree(profile.root, tmp_path / "p")
+    prof = Profile.load(tmp_path / "p")
+    base = typeset("ааа", prof, Settings(seed=1, live_edge=0.0))
+    prof.set_letter_adjust("а", scale=1.3, raise_mm=1.0)
+    big = typeset("ааа", prof, Settings(seed=1, live_edge=0.0))
+    g0, g1 = base.pages[0].glyphs[0], big.pages[0].glyphs[0]
+    assert g1.scale == pytest.approx(1.3 * g0.scale, rel=0.01)
+    assert g1.y < g0.y - 0.8  # выше строки
