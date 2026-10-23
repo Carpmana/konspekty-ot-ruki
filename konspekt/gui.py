@@ -14,18 +14,19 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QSettings, QSizeF, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QImage, QKeySequence, QPageLayout, QPageSize, QPainter, QPixmap,
+    QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPen, QKeySequence, QPageLayout, QPageSize, QPainter, QPixmap,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
+    QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 from . import service as sv
-from .profile import GlyphSample, Profile
+from .charset import DIGITS, PUNCT, RU_LOWER, RU_UPPER
+from .profile import DRAWN_SOURCE, GlyphSample, Profile
 from .template import TEMPLATE_SETS, save_template_pdf
 
 APP_NAME = "Конспекты от руки"
@@ -98,7 +99,10 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
 
 
-def page_size(key: str) -> QPageSize:
+def page_size(key: str, spread: bool = False) -> QPageSize:
+    if spread:  # развёрнутый двойной листок 340×205: в принтер узкой стороной, печать альбомная
+        w, h = sv.FORMAT_BY_KEY[key].size_mm
+        return QPageSize(QSizeF(h, 2 * w), QPageSize.Millimeter, "Двойной листок", QPageSize.ExactMatch)
     if key == "A4":
         return QPageSize(QPageSize.A4)
     if key == "A5":
@@ -374,6 +378,200 @@ class SamplesDialog(QDialog):
         self.accept()
 
 
+class DrawCanvas(QWidget):
+    """Клетка тетради, в которой букву рисуют мышью, тачпадом или пером.
+    Координаты штрихов хранятся в миллиметрах клетки."""
+
+    BASELINE_MM = 16.0
+    HEIGHT_MM = 25.0
+
+    def __init__(self, x_height_mm: float, stroke_mm: float, ink: tuple[int, int, int]):
+        super().__init__()
+        self.xh = x_height_mm
+        self.stroke_mm = stroke_mm
+        self.ink = QColor(*ink)
+        self.width_mm = 30.0
+        self.strokes: list[list[tuple[float, float]]] = []
+        self.setMinimumSize(420, 300)
+        self.setCursor(Qt.CrossCursor)
+        self.setAttribute(Qt.WA_AcceptTouchEvents, False)
+
+    def set_chars(self, n: int):
+        self.width_mm = 20.0 + 12.0 * max(1, n)
+        self.update()
+
+    def _scale(self) -> float:
+        return min(self.width() / self.width_mm, self.height() / self.HEIGHT_MM)
+
+    def _offset(self) -> float:
+        return max(0.0, (self.width() - self.width_mm * self._scale()) / 2)
+
+    def _to_mm(self, pos) -> tuple[float, float]:
+        k = self._scale()
+        return (pos.x() - self._offset()) / k, pos.y() / k
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.strokes.append([self._to_mm(e.position())])
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.LeftButton and self.strokes:
+            self.strokes[-1].append(self._to_mm(e.position()))
+            self.update()
+
+    def undo(self):
+        if self.strokes:
+            self.strokes.pop()
+            self.update()
+
+    def clear(self):
+        self.strokes = []
+        self.update()
+
+    def paintEvent(self, e):
+        k = self._scale()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(self._offset(), 0)
+        p.fillRect(0, 0, int(self.width_mm * k), int(self.HEIGHT_MM * k), QColor("#ffffff"))
+        p.setPen(QPen(QColor("#d4def2"), 1))
+        x = 0.0
+        while x <= self.width_mm:
+            p.drawLine(int(x * k), 0, int(x * k), int(self.HEIGHT_MM * k))
+            x += 5.0
+        y = 0.0
+        while y <= self.HEIGHT_MM:
+            p.drawLine(0, int(y * k), int(self.width_mm * k), int(y * k))
+            y += 5.0
+        b = self.BASELINE_MM
+        for yy, color, style in ((b, "#3156c8", Qt.SolidLine), (b - self.xh, "#3156c8", Qt.DashLine),
+                                 (b - 2 * self.xh, "#9fb1e3", Qt.DotLine), (b + self.xh, "#9fb1e3", Qt.DotLine)):
+            p.setPen(QPen(QColor(color), 2, style))
+            p.drawLine(0, int(yy * k), int(self.width_mm * k), int(yy * k))
+        pen = QPen(self.ink, max(self.stroke_mm * k, 1.5), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        for st in self.strokes:
+            if len(st) == 1:
+                p.drawPoint(int(st[0][0] * k), int(st[0][1] * k))
+            for (x0, y0), (x1, y1) in zip(st, st[1:]):
+                p.drawLine(int(x0 * k), int(y0 * k), int(x1 * k), int(y1 * k))
+        p.end()
+
+
+class DrawDialog(QDialog):
+    """Дорисовать варианты букв без сканера: нарисовать, сохранить, удалить неудачный."""
+
+    def __init__(self, parent, prof: Profile, start: str = ""):
+        super().__init__(parent)
+        self.prof = prof
+        self.setWindowTitle(f"Нарисовать буквы — {prof.name}")
+        self.resize(760, 640)
+        lay = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Буква или сочетание:"))
+        self.text_box = QComboBox()
+        self.text_box.setEditable(True)
+        self.text_box.addItems(list(RU_LOWER + RU_UPPER + DIGITS + PUNCT))
+        self.text_box.setCurrentText(start or "а")
+        row.addWidget(self.text_box, 1)
+        self.count_label = QLabel(objectName="hint")
+        row.addWidget(self.count_label)
+        lay.addLayout(row)
+        lay.addWidget(QLabel("Пишите в клетке мышью, на тачпаде или пером: строчные стоят на синей линии и "
+                             "доходят до пунктира. Неудачный штрих — «Отменить штрих». Сохраните несколько "
+                             "вариантов одной буквы, программа будет их чередовать.", objectName="hint",
+                             wordWrap=True))
+
+        p = prof.params
+        self.canvas = DrawCanvas(p.x_height_mm, p.stroke_mm, p.ink_color)
+        lay.addWidget(self.canvas, 1)
+
+        buttons = QHBoxLayout()
+        undo = QPushButton("Отменить штрих")
+        undo.setShortcut(QKeySequence.Undo)
+        undo.clicked.connect(self.canvas.undo)
+        clear = QPushButton("Стереть")
+        clear.clicked.connect(self.canvas.clear)
+        self.save_btn = QPushButton("Сохранить вариант", objectName="primary")
+        self.save_btn.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return))
+        self.save_btn.clicked.connect(self.save_variant)
+        buttons.addWidget(undo)
+        buttons.addWidget(clear)
+        buttons.addStretch(1)
+        buttons.addWidget(self.save_btn)
+        lay.addLayout(buttons)
+
+        lay.addWidget(QLabel("Варианты этой буквы. Нарисованный щелчком удаляется, "
+                             "со скана — отключается или возвращается:", objectName="hint", wordWrap=True))
+        self.strip_box = QWidget()
+        self.strip = QHBoxLayout(self.strip_box)
+        self.strip.setAlignment(Qt.AlignLeft)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(self.strip_box)
+        area.setFixedHeight(130)
+        lay.addWidget(area)
+
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.button(QDialogButtonBox.Close).setText("Готово")
+        close.rejected.connect(self.accept)
+        lay.addWidget(close)
+
+        self.text_box.currentTextChanged.connect(self._text_changed)
+        self._text_changed()
+
+    def text(self) -> str:
+        return self.text_box.currentText().strip()
+
+    def _text_changed(self, *_):
+        self.canvas.clear()
+        self.canvas.set_chars(len(self.text()))
+        self._show_variants()
+
+    def strip_buttons(self) -> list[QToolButton]:
+        return [self.strip.itemAt(i).widget() for i in range(self.strip.count())]
+
+    def _show_variants(self):
+        while self.strip.count():
+            old = self.strip.takeAt(0).widget()
+            old.setParent(None)
+            old.deleteLater()
+        found = [s for s in self.prof.samples if s.text == self.text()]
+        on = sum(1 for s in found if s.enabled)
+        self.count_label.setText(f"вариантов: {on}")
+        for s in found:
+            b = QToolButton(objectName="sample")
+            b.setCheckable(True)
+            b.setChecked(s.enabled)
+            pm = sample_pixmap(self.prof, s, 80)
+            b.setIcon(pm)
+            b.setIconSize(pm.size())
+            b.setProperty("sample_id", s.id)
+            drawn = s.source == DRAWN_SOURCE
+            b.setToolTip("Нарисован здесь: щелчок удаляет" if drawn else f"Со скана: {s.source}")
+            b.clicked.connect(lambda _=False, sid=s.id, d=drawn: self._variant_clicked(sid, d))
+            self.strip.addWidget(b)
+
+    def _variant_clicked(self, sid: str, drawn: bool):
+        if drawn:
+            self.prof.remove(sid)
+        else:
+            s = next(x for x in self.prof.samples if x.id == sid)
+            s.enabled = not s.enabled
+            self.prof.measure()
+        self.prof.save()
+        self._show_variants()
+
+    def save_variant(self):
+        if not self.text() or not self.canvas.strokes:
+            return
+        sv.add_drawn_sample(self.prof, self.text(), self.canvas.strokes, DrawCanvas.BASELINE_MM)
+        self.canvas.clear()
+        self._show_variants()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, profiles_dir: str | Path | None = None, settings: QSettings | None = None):
         super().__init__()
@@ -452,16 +650,25 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         imp = QPushButton("Импорт сканов…")
         imp.clicked.connect(self.import_scans)
-        blank = QPushButton("Бланк…")
+        blank = QPushButton("Бланк ▾")
         blank.setToolTip("Сохранить бланк образцов для заполнения ручкой")
-        blank.clicked.connect(lambda: self.save_template("main"))
+        blank_menu = QMenu(blank)
+        for key, ts in TEMPLATE_SETS.items():
+            blank_menu.addAction(f"{ts.title.capitalize()} бланк…", lambda k=key: self.save_template(k))
+        blank.setMenu(blank_menu)
         row.addWidget(imp, 1)
         row.addWidget(blank)
         sl.addLayout(row)
+        row2 = QHBoxLayout()
         samples = QPushButton("Образцы букв…")
         samples.setToolTip("Посмотреть варианты каждой буквы и отключить неудачные или зачёркнутые (Ctrl+B)")
         samples.clicked.connect(self.edit_samples)
-        sl.addWidget(samples)
+        draw = QPushButton("Нарисовать…")
+        draw.setToolTip("Дописать варианты букв мышью или на тачпаде, удалить и переделать неудачные (Ctrl+D)")
+        draw.clicked.connect(self.draw_letters)
+        row2.addWidget(samples, 1)
+        row2.addWidget(draw, 1)
+        sl.addLayout(row2)
 
         section("Бумага")
         self.page_box = QComboBox()
@@ -529,6 +736,14 @@ class MainWindow(QMainWindow):
         sl.addLayout(offs)
         self.real_hint = hint("Вставьте листок в лоток как бумагу размера «Тетрадный листок». "
                               "Если строки легли не по клеткам, сдвиньте текст и напечатайте снова.")
+        self.spread_box = QCheckBox("Двойной листок целиком\n(2 страницы рядом, с оборотом)")
+        self.spread_box.setToolTip("Развёрнутый двойной листок 340×205 мм вставляется в принтер узкой стороной. "
+                                   "Сначала печатаются страницы 4 и 1, потом листок переворачивают — 2 и 3.")
+        sl.addWidget(self.spread_box)
+        self.flip_back = QCheckBox("Оборот вверх ногами")
+        self.flip_back.setToolTip("Включите, если на обороте текст вышел перевёрнутым: "
+                                  "зависит от того, как принтер берёт листок.")
+        sl.addWidget(self.flip_back)
         sl.addStretch(1)
 
         side_scroll = QScrollArea(objectName="sidebar")
@@ -611,6 +826,9 @@ class MainWindow(QMainWindow):
         self.page_box.currentIndexChanged.connect(self._format_changed)
         self.paper_box.currentIndexChanged.connect(self._lining_changed)
         self.real_paper.toggled.connect(self._update_print_mode)
+        self.spread_box.toggled.connect(self._update_print_mode)
+        self.spread_box.toggled.connect(self.schedule_preview)
+        self.page_box.currentIndexChanged.connect(self._update_print_mode)
         self._update_print_mode()
 
     def _format_changed(self, *_):
@@ -629,6 +847,9 @@ class MainWindow(QMainWindow):
         on = self.real_paper.isChecked()
         for w in (self.offset_label, self.off_x, self.off_y, self.real_hint):
             w.setVisible(on)
+        notebook = self.page_box.currentData() == "notebook"
+        self.spread_box.setVisible(notebook)
+        self.flip_back.setVisible(notebook and self.spread_box.isChecked())
 
     def _build_menu(self):
         def act(menu, title, slot, shortcut=None):
@@ -652,6 +873,7 @@ class MainWindow(QMainWindow):
         act(m, "Сохранить дополнительный бланк (PDF)…", lambda: self.save_template("extra"))
         act(m, "Что есть в профиле", self.show_coverage)
         act(m, "Образцы букв…", self.edit_samples, "Ctrl+B")
+        act(m, "Нарисовать буквы…", self.draw_letters, "Ctrl+D")
         m.addSeparator()
         act(m, "Открыть папку профилей", self.open_profiles_dir)
         act(m, "Выбрать папку профилей…", self.choose_profiles_dir)
@@ -679,6 +901,8 @@ class MainWindow(QMainWindow):
         self.real_paper.setChecked(q.value("real_paper", "false") in (True, "true"))
         self.off_x.setValue(float(q.value("offset_x_mm", 0.0)))
         self.off_y.setValue(float(q.value("offset_y_mm", 0.0)))
+        self.spread_box.setChecked(q.value("spread", "false") in (True, "true"))
+        self.flip_back.setChecked(q.value("flip_back", "false") in (True, "true"))
         self._update_counter()
 
     def _save_settings(self):
@@ -690,6 +914,8 @@ class MainWindow(QMainWindow):
         q.setValue("real_paper", self.real_paper.isChecked())
         q.setValue("offset_x_mm", self.off_x.value())
         q.setValue("offset_y_mm", self.off_y.value())
+        q.setValue("spread", self.spread_box.isChecked())
+        q.setValue("flip_back", self.flip_back.isChecked())
         q.setValue("seed", self.seed_spin.value())
         q.setValue("neatness10", self.neat_slider.value())
         q.setValue("size_mm", self.size_spin.value())
@@ -708,7 +934,7 @@ class MainWindow(QMainWindow):
                           size_mm=size if size > 0 else None, pitch_mm=self.pitch_spin.value(),
                           show_missing=self.show_missing.isChecked(), margins=self.margin_box.currentData(),
                           real_paper=self.real_paper.isChecked(), offset_x_mm=self.off_x.value(),
-                          offset_y_mm=self.off_y.value())
+                          offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked())
 
     # ---------- профили ----------
 
@@ -777,6 +1003,12 @@ class MainWindow(QMainWindow):
         if not self._need_profile():
             return
         QMessageBox.information(self, "Что есть в профиле", sv.coverage_text(self.profile))
+
+    def draw_letters(self):
+        if not self._need_profile():
+            return
+        DrawDialog(self, self.profile).exec()
+        self.refresh_preview()
 
     def edit_samples(self):
         if not self._need_profile():
@@ -863,10 +1095,22 @@ class MainWindow(QMainWindow):
     def _preview_done(self, gen: int, r: sv.Rendered):
         if gen != self._generation:
             return
-        self.pages.set_pages([to_qimage(im) for im in r.images])
+        images = [to_qimage(im) for im in r.images]
+        if r.is_spread:  # линия сгиба только на экране, на печать не идёт
+            for qi in images:
+                p = QPainter(qi)
+                p.setPen(QPen(QColor(120, 130, 150), 1, Qt.DashLine))
+                p.drawLine(qi.width() // 2, 0, qi.width() // 2, qi.height())
+                p.end()
+        self.pages.set_pages(images)
         self._set_missing(r.missing)
         n = len(r.images)
-        self.pages_label.setText(f"{n} {_plural(n, 'страница', 'страницы', 'страниц')}")
+        if r.is_spread:
+            k = n // 2
+            self.pages_label.setText(f"{k} {_plural(k, 'двойной листок', 'двойных листка', 'двойных листков')}: "
+                                     "сначала снаружи (стр. 4 и 1), потом внутри (стр. 2 и 3)")
+        else:
+            self.pages_label.setText(f"{n} {_plural(n, 'страница', 'страницы', 'страниц')}")
         self.statusBar().clearMessage()
 
     def _set_missing(self, missing: set[str]):
@@ -897,25 +1141,51 @@ class MainWindow(QMainWindow):
             return
         opts = self.options()
         printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageLayout(QPageLayout(page_size(opts.page), QPageLayout.Portrait, printer.pageLayout().margins()))
+        orient = QPageLayout.Landscape if opts.use_spread else QPageLayout.Portrait
+        printer.setPageLayout(QPageLayout(page_size(opts.page, opts.use_spread), orient,
+                                          printer.pageLayout().margins()))
         printer.setFullPage(True)  # страница рисуется в реальном размере, без масштабирования
         if QPrintDialog(printer, self).exec() != QDialog.Accepted:
             return
         self._run(sv.render_text, (self.text_edit.toPlainText(), self.profile, opts, sv.PRINT_DPI, True),
                   lambda r: self._paint_to_printer(printer, r), "Подготовка страниц к печати…")
 
-    def _paint_to_printer(self, printer: QPrinter, r: sv.Rendered):
+    def _paint_to_printer(self, printer: QPrinter, r: sv.Rendered, ask_flip: bool = True):
+        if not r.is_spread:
+            if self._paint_images(printer, r.images):
+                self.statusBar().showMessage(f"Отправлено на печать: {len(r.images)} стр.", 8000)
+            return
+        # Двойной листок: сначала все наружные стороны, потом листки переворачивают.
+        outer = [r.images[i] for i in r.side_indices(inner=False)]
+        inner = [r.images[i] for i in r.side_indices(inner=True)]
+        if self.flip_back.isChecked():
+            inner = [im.rotate(180) for im in inner]
+        if not self._paint_images(printer, outer):
+            return
+        n = len(outer)
+        if ask_flip and QMessageBox.information(
+                self, "Печать на двойной листок",
+                f"Напечатана наружная сторона ({n} {_plural(n, 'листок', 'листка', 'листков')}: страницы 4 и 1).\n\n"
+                "Дайте чернилам высохнуть, переверните листки и вставьте их снова тем же краем вперёд, "
+                "в том же порядке. Затем нажмите OK — напечатается внутренняя сторона (страницы 2 и 3).",
+                QMessageBox.Ok | QMessageBox.Cancel) != QMessageBox.Ok:
+            return
+        if self._paint_images(printer, inner):
+            self.statusBar().showMessage(f"Отправлено на печать: {n} {_plural(n, 'листок', 'листка', 'листков')}"
+                                         " с двух сторон", 8000)
+
+    def _paint_images(self, printer: QPrinter, images) -> bool:
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.warning(self, APP_NAME, "Не удалось начать печать.")
-            return
+            return False
         target = printer.pageLayout().fullRectPixels(printer.resolution())
-        for k, im in enumerate(r.images):
+        for k, im in enumerate(images):
             if k:
                 printer.newPage()
             painter.drawImage(target, to_qimage(im))
         painter.end()
-        self.statusBar().showMessage(f"Отправлено на печать: {len(r.images)} стр.", 8000)
+        return True
 
     # ---------- фоновые задачи ----------
 
@@ -961,9 +1231,15 @@ class MainWindow(QMainWindow):
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(f"{ASSETS}/icon.png"))
     app.setStyle("Fusion")
     if sys.platform == "win32":
         app.setFont(QFont("Segoe UI", 10))
+        try:  # своя иконка на панели задач, а не значок Python
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Carpmana.Konspekt")
+        except (AttributeError, OSError):
+            pass
     if os.environ.get("KONSPEKT_SMOKE"):
         return _smoke(app)
     w = MainWindow(os.environ.get("KONSPEKT_PROFILES"))

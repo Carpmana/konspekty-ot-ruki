@@ -168,3 +168,57 @@ def test_crossed_offer_and_samples_save(app, profile, tmp_path, monkeypatch):
     assert next(s for s in Profile.load(prof.root).samples if s.id == sid).enabled
     wait_idle(app, w)
     w.close()
+
+
+def test_print_double_sheet(app, window, profile, tmp_path):
+    from PySide6.QtGui import QPageLayout
+    from PySide6.QtPrintSupport import QPrinter
+
+    import pymupdf
+
+    out = tmp_path / "двойной.pdf"
+    printer = QPrinter(QPrinter.HighResolution)
+    printer.setOutputFormat(QPrinter.PdfFormat)
+    printer.setOutputFileName(str(out))
+    printer.setPageLayout(QPageLayout(gui.page_size("notebook", True), QPageLayout.Landscape,
+                                      printer.pageLayout().margins()))
+    printer.setFullPage(True)
+    r = sv.render_text("Ощущение.", profile, sv.Options(page="notebook", spread=True, real_paper=True), 72, True)
+    window._paint_to_printer(printer, r, ask_flip=False)
+    with pymupdf.open(out) as d:  # второй проход (оборот) перезаписал файл: одна сторона
+        w, h = d[0].rect.width / 72 * 25.4, d[0].rect.height / 72 * 25.4
+    assert abs(w - 340) < 1.5 and abs(h - 205) < 1.5
+
+
+def test_spread_option_only_for_notebook(app, window):
+    window.page_box.setCurrentIndex(window.page_box.findData("A4"))
+    assert window.spread_box.isHidden()
+    window.page_box.setCurrentIndex(window.page_box.findData("notebook"))
+    assert not window.spread_box.isHidden()
+    window.spread_box.setChecked(True)
+    assert window.options().use_spread
+    assert not window.flip_back.isHidden()
+
+
+def test_draw_dialog_save_and_delete(app, window, tmp_path):
+    import shutil
+
+    from konspekt.profile import Profile
+
+    root = tmp_path / "Тест"
+    shutil.copytree(window.profile.root, root)
+    prof = Profile.load(root)
+    dlg = gui.DrawDialog(window, prof, "ж")
+    n = len(dlg.strip_buttons())
+    dlg.canvas.strokes = [[(10, 12), (14, 16)], [(14, 12), (10, 16)]]
+    dlg.save_variant()
+    assert dlg.canvas.strokes == []
+    buttons = dlg.strip_buttons()
+    assert len(buttons) == n + 1
+    drawn = buttons[-1]
+    assert "удаляет" in drawn.toolTip()
+    drawn.click()
+    app.processEvents()
+    assert len(dlg.strip_buttons()) == n
+    assert len(Profile.load(root).variants("ж")) == n
+    dlg.close()

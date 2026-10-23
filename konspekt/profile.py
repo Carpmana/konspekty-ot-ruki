@@ -33,6 +33,8 @@ FORMAT_VERSION = 1
 DESCENDERS = set("дзруфцщ" + "gjpqy" + ",;")
 BASELINE_FIX_MM = 2.5
 
+DRAWN_SOURCE = "нарисовано в программе"
+
 # Зачёркнутый образец: чернил в разы больше, чем у других вариантов того же
 # символа. У живых вариантов разброс до ~1.7 раза.
 CROSSED_INK_RATIO = 2.2
@@ -158,6 +160,30 @@ class Profile:
             added.append(s)
         self.measure()
         return added
+
+    def add_drawn(self, text: str, alpha: np.ndarray, baseline: float, style: str = BODY) -> GlyphSample:
+        """Образец, нарисованный в окне программы (мышью, тачпадом, пером).
+        alpha — плотность чернил 0..1 при 300 dpi, baseline — точно известна."""
+        sid = uuid.uuid4().hex[:12]
+        fname = f"samples/{sid}.png"
+        img = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
+        (self.root / "samples").mkdir(parents=True, exist_ok=True)
+        Image.fromarray(img, "L").save(self.root / fname)
+        entry, exit_ = entry_exit_points(alpha, baseline)
+        xh = estimate_xheight_px(alpha, baseline) if len(text) > 1 else None
+        s = GlyphSample(sid, text, style, fname, float(baseline), img.shape[1], img.shape[0],
+                        stroke_width_px(alpha), entry, exit_, True, DRAWN_SOURCE, xh)
+        self.samples.append(s)
+        self.measure()
+        return s
+
+    def remove(self, sample_id: str) -> None:
+        """Удаляет образец вместе с картинкой (для нарисованных: «переделать»)."""
+        s = next(x for x in self.samples if x.id == sample_id)
+        self.samples.remove(s)
+        self._cache.pop(sample_id, None)
+        (self.root / s.file).unlink(missing_ok=True)
+        self.measure()
 
     def is_imported(self, path: str | Path) -> bool:
         return file_sha256(path) in self.imported

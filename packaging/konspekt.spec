@@ -14,5 +14,6 @@ a = Analysis(
               "PySide6.QtMultimedia", "PySide6.Qt3DCore"],
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="Konspekt", console=False)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="Konspekt", console=False,
+          icon=str(ROOT / "konspekt" / "assets" / "icon.ico"))
 coll = COLLECT(exe, a.binaries, a.datas, name="Konspekt")
