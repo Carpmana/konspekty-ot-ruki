@@ -281,3 +281,16 @@ def test_spread_flip_back_rotates_inner_side(profile):
     assert not np.array_equal(a, b)
     dy = round(2.0 * 40 / 25.4)
     assert b[:dy].sum() == 0 and a[:dy].sum() == 0
+
+
+def test_preview_then_finish_import(filled_photos, tmp_path):
+    root = sv.profile_dir_for(tmp_path, "Проверка")
+    preview = sv.scan_import(root, "Проверка", filled_photos[:1])
+    assert preview.samples and not (root / "profile.json").exists()
+    keep = [i % 5 != 0 for i in range(len(preview.samples))]
+    res = sv.finish_import(preview, keep)
+    prof = Profile.load(root)
+    assert res.added == len(preview.samples)
+    assert sum(not s.enabled for s in prof.samples) >= keep.count(False)
+    assert res.turned_off + len(res.crossed) == sum(not s.enabled for s in prof.samples)
+    assert "Отключено при просмотре" in res.summary()

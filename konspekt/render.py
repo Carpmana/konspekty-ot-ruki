@@ -68,13 +68,29 @@ def _blend(page: np.ndarray, alpha: np.ndarray, x0: int, y0: int, color: np.ndar
     roi += color * a
 
 
-def normalized_image(profile: Profile, sample) -> np.ndarray:
+def smooth_stroke(a: np.ndarray, amount: float) -> np.ndarray:
+    """Заглаживает штрих шариковой ручки: закрывает пропуски, где шарик
+    не провернулся, и выравнивает зернистую плотность внутри линии.
+
+    Толщина линии сохраняется, бледные места не пропадают. amount 0 — как
+    в скане, 1 — ровная линия, как у гелевой ручки."""
+    if amount <= 0:
+        return a
+    closed = cv2.morphologyEx(a, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    blur = cv2.GaussianBlur(closed, (0, 0), 0.6 + 0.6 * amount)
+    t = np.clip((blur - 0.3) / 0.35, 0.0, 1.0)
+    solid = np.maximum(t * t * (3 - 2 * t), np.clip(blur * 1.6, 0.0, 1.0))
+    return ((1 - amount) * a + amount * solid).astype(np.float32)
+
+
+def normalized_image(profile: Profile, sample, smoothness: float = 0.0) -> np.ndarray:
     """Образец с толщиной линии, приведённой к общей для профиля.
 
     Образцы с разных страниц скана выходят то тоньше, то жирнее (свет,
     резкость). Настоящая ручка пишет одной толщиной, поэтому слишком жирные
     образцы слегка «сужаем», а слишком тонкие — утолщаем."""
-    key = f"{sample.id}:norm"
+    smoothness = round(float(np.clip(smoothness, 0.0, 1.0)), 2)
+    key = f"{sample.id}:norm:{smoothness}"
     if key not in profile._cache:
         a = profile.image(sample)
         target = mm_to_px(profile.params.stroke_mm, SAMPLE_DPI)
@@ -83,12 +99,12 @@ def normalized_image(profile: Profile, sample) -> np.ndarray:
         if r >= 1:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
             a = cv2.erode(a, kernel) if k > 0 else cv2.dilate(a, kernel)
-        profile._cache[key] = a
+        profile._cache[key] = smooth_stroke(a, smoothness)
     return profile._cache[key]
 
 
 def _draw_glyph(page: np.ndarray, g: Glyph, profile: Profile, s: Settings, ink: np.ndarray) -> None:
-    src = normalized_image(profile, g.sample) if not g.fallback else profile.image(g.sample)
+    src = normalized_image(profile, g.sample, s.smoothness) if not g.fallback else profile.image(g.sample)
     ppm = mm_to_px(1.0, s.dpi)
     c, sn = math.cos(g.rot), math.sin(g.rot)
     lin = ppm * g.scale * np.array([[c, -sn], [sn, c]]) @ np.array([[1.0, -g.shear], [0.0, 1.0]])

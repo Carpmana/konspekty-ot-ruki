@@ -383,10 +383,96 @@ class ImportDialog(QDialog):
 
 
 def sample_pixmap(prof: Profile, s: GlyphSample, height: int = 90) -> QPixmap:
-    a = prof.image(s)
+    return alpha_pixmap(prof.image(s), height)
+
+
+def alpha_pixmap(a: np.ndarray, height: int = 90) -> QPixmap:
     gray = np.ascontiguousarray(255 - np.clip(a * 255, 0, 255).astype(np.uint8))
     im = QImage(gray.data, gray.shape[1], gray.shape[0], gray.strides[0], QImage.Format_Grayscale8).copy()
     return QPixmap.fromImage(im).scaledToHeight(height, Qt.SmoothTransformation)
+
+
+class ImportPreviewDialog(QDialog):
+    """Вырезанные из сканов буквы перед сохранением в почерк.
+
+    Буквы, которые упираются в край клетки (вылезли за уголки и, скорее
+    всего, обрезаны), сразу не отмечены. Щелчок по букве — брать её или нет.
+    Не взятые сохраняются отключёнными, их можно вернуть в «Редакторе букв»."""
+
+    COLUMNS = 6
+
+    def __init__(self, parent, preview: sv.ImportPreview):
+        super().__init__(parent)
+        self.preview = preview
+        self.keep = [not e.clipped for e in preview.samples]
+        self.setWindowTitle(f"Проверка букв — {preview.profile_name}")
+        self.resize(900, 680)
+        lay = QVBoxLayout(self)
+        n_clipped = sum(1 for e in preview.samples if e.clipped)
+        head = f"Вырезано букв и слов: {len(preview.samples)}. Щелчок по образцу — не брать его, второй щелчок — взять."
+        if n_clipped:
+            head += (f" {n_clipped} упираются в край клетки, похоже, обрезаны; они в красной рамке и "
+                     "не будут взяты, если их не отметить.")
+        lay.addWidget(QLabel(head, objectName="hint", wordWrap=True))
+        self.only_bad = QCheckBox("Показать только обрезанные")
+        self.only_bad.setVisible(bool(n_clipped))
+        self.only_bad.toggled.connect(self._filter)
+        lay.addWidget(self.only_bad)
+
+        box = QWidget()
+        self.grid = QGridLayout(box)
+        self.grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.tiles: list[QWidget] = []
+        for i, e in enumerate(preview.samples):
+            tile = QWidget()
+            tl = QVBoxLayout(tile)
+            tl.setContentsMargins(0, 0, 0, 0)
+            tl.setSpacing(2)
+            b = QToolButton(objectName="sample")
+            b.setCheckable(True)
+            b.setChecked(self.keep[i])
+            pm = alpha_pixmap(e.alpha, 56)
+            if pm.width() > 110:
+                pm = pm.scaledToWidth(110, Qt.SmoothTransformation)
+            b.setIcon(pm)
+            b.setIconSize(pm.size())
+            b.setToolTip(("Упирается в край клетки — возможно, обрезана. " if e.clipped else "") + e.source)
+            b.toggled.connect(lambda on, k=i: self._toggle(k, on))
+            tl.addWidget(b, 0, Qt.AlignHCenter)
+            tl.addWidget(QLabel(e.cell.request.text, objectName="hint", alignment=Qt.AlignHCenter))
+            self.tiles.append(tile)
+        self._filter()
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(box)
+        lay.addWidget(area, 1)
+
+        self.count_label = QLabel(objectName="hint")
+        lay.addWidget(self.count_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Сохранить в почерк")
+        buttons.button(QDialogButtonBox.Cancel).setText("Отмена")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+        self._update_count()
+
+    def _toggle(self, k: int, on: bool):
+        self.keep[k] = on
+        self._update_count()
+
+    def _update_count(self):
+        off = self.keep.count(False)
+        self.count_label.setText(f"Не будут взяты: {off}" if off else "Будут взяты все")
+
+    def _filter(self, *_):
+        while self.grid.count():
+            self.grid.takeAt(0)
+        shown = [t for t, e in zip(self.tiles, self.preview.samples) if e.clipped or not self.only_bad.isChecked()]
+        for k, t in enumerate(shown):
+            self.grid.addWidget(t, k // self.COLUMNS, k % self.COLUMNS)
+        for t in self.tiles:
+            t.setVisible(t in shown)
 
 
 class SamplesDialog(QDialog):
@@ -1036,6 +1122,17 @@ class MainWindow(QMainWindow):
         eends.addStretch(1)
         eends.addWidget(QLabel("свободно", objectName="hint"))
         sl.addLayout(eends)
+        self.smooth_slider = QSlider(Qt.Horizontal)
+        self.smooth_slider.setRange(0, 10)
+        self.smooth_slider.setToolTip("Шариковая ручка оставляет пропуски и зернистую линию. Чем правее, тем "
+                                      "ровнее и сплошнее штрих. 0 — точно как в скане")
+        sl.addWidget(QLabel("Гладкость линии"))
+        sl.addWidget(self.smooth_slider)
+        smends = QHBoxLayout()
+        smends.addWidget(QLabel("как в скане", objectName="hint"))
+        smends.addStretch(1)
+        smends.addWidget(QLabel("гладко", objectName="hint"))
+        sl.addLayout(smends)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(0.0, 8.0)
         self.size_spin.setSingleStep(0.25)
@@ -1267,7 +1364,7 @@ class MainWindow(QMainWindow):
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
-                    self.edge_slider.valueChanged,
+                    self.edge_slider.valueChanged, self.smooth_slider.valueChanged,
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
             sig.connect(self.schedule_preview)
@@ -1389,6 +1486,7 @@ class MainWindow(QMainWindow):
         self.tired_slider.setValue(int(q.value("tiredness10", 3)))
         self.fix_slider.setValue(int(q.value("corrections10", 0)))
         self.edge_slider.setValue(int(q.value("live_edge10", 5)))
+        self.smooth_slider.setValue(int(q.value("smooth10", 5)))
         self.size_spin.setValue(float(q.value("size_mm", 0.0)))
         self.pitch_spin.setValue(float(q.value("pitch_mm", 10.0)))
         self.real_paper.setChecked(q.value("real_paper", "false") in (True, "true"))
@@ -1422,6 +1520,7 @@ class MainWindow(QMainWindow):
         q.setValue("tiredness10", self.tired_slider.value())
         q.setValue("corrections10", self.fix_slider.value())
         q.setValue("live_edge10", self.edge_slider.value())
+        q.setValue("smooth10", self.smooth_slider.value())
         q.setValue("size_mm", self.size_spin.value())
         q.setValue("pitch_mm", self.pitch_spin.value())
         q.setValue("profile", self.profile_box.currentText())
@@ -1441,7 +1540,7 @@ class MainWindow(QMainWindow):
                           offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
                           nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
                           corrections=self.fix_slider.value() / 200, live_edge=self.edge_slider.value() / 5,
-                          flip_back=self.flip_back.isChecked())
+                          flip_back=self.flip_back.isChecked(), smoothness=self.smooth_slider.value() / 10)
 
     # ---------- профили ----------
 
@@ -1499,8 +1598,17 @@ class MainWindow(QMainWindow):
             if (Path(path) / "profile.json").exists():
                 QMessageBox.warning(self, APP_NAME, f"Профиль с таким именем уже есть: {name}")
                 return
-        self._run(sv.import_scans, (path, name, dlg.selected_files()), self._import_done,
+        self._run(sv.scan_import, (path, name, dlg.selected_files()), self._import_scanned,
                   "Импорт сканов… это может занять минуту")
+
+    def _import_scanned(self, preview: sv.ImportPreview):
+        keep = None
+        if preview.samples:
+            check = ImportPreviewDialog(self, preview)
+            if check.exec() != QDialog.Accepted:
+                return
+            keep = check.keep
+        self._run(sv.finish_import, (preview, keep), self._import_done, "Сохранение букв в почерк…")
 
     def _import_done(self, res: sv.ImportResult):
         self.reload_profiles(res.profile_name)

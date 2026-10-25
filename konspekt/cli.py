@@ -79,7 +79,7 @@ def cmd_render(args) -> int:
     text = Path(args.text).read_text(encoding="utf-8-sig")
     s = lay.Settings(page=args.page, paper=args.paper, dpi=args.dpi, seed=args.seed,
                      neatness=args.neatness, x_height_mm=args.size, line_pitch_mm=args.pitch,
-                     highlight_missing=args.show_missing)
+                     highlight_missing=args.show_missing, smoothness=args.smooth)
     layout = lay.typeset(text, prof, s)
     images = render(layout, prof)
     out = Path(args.out)
@@ -125,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--size", type=float, default=None, help="высота строчных, мм")
     g.add_argument("--pitch", type=float, default=10.0, help="расстояние между строками, мм")
     g.add_argument("--show-missing", action="store_true", help="подсветить символы без образцов")
+    g.add_argument("--smooth", type=float, default=0.5, help="гладкость линии: 0 как в скане, 1 ровно")
     g.set_defaults(func=cmd_render)
 
     args = ap.parse_args(argv)
