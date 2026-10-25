@@ -13,15 +13,19 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QEasingCurve, QObject, QProcess, QPropertyAnimation, QRunnable, QSettings, QSizeF, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QEasingCurve, QObject, QProcess, QPropertyAnimation, QRectF, QRunnable, QSettings, QSize, QSizeF, Qt, QThreadPool,
+    QTimer, QUrl, Signal, Slot,
+)
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QFont, QIcon, QImage, QPen, QKeySequence, QPageLayout, QPageSize, QPainter, QPixmap,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QToolButton,
+    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget,
+    QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -30,18 +34,18 @@ from .charset import DIGITS, PUNCT, RU_LOWER, RU_UPPER
 from .layout import Settings as LayoutSettings, typeset
 from .profile import DRAWN_SOURCE, RAISE_LIMITS_MM, SCALE_LIMITS, GlyphSample, Profile
 from .render import render_page
-from .print_wizard import PrintStep, PrintWizard
+from .print_wizard import PrintPage, PrintStep
 from .template import TEMPLATE_SETS, save_template_pdf
 from .viewer import PagesView
 
 APP_NAME = "Конспекты от руки"
 PREVIEW_DELAY_MS = 700
 
-ACCENT = "#3156c8"
+ACCENT = "#1b7a57"
 ASSETS = (Path(__file__).parent / "assets").as_posix()
 
 STYLE = f"""
-QMainWindow, QWidget#body {{ background: #f4f5f8; }}
+QMainWindow, QWidget#body {{ background: #f3f5f8; }}
 QDialog, QMessageBox {{ background: #ffffff; }}
 QWidget {{ font-size: 10pt; color: #1f2430; }}
 QFrame#header {{ background: #ffffff; border-bottom: 1px solid #e3e6ee; }}
@@ -54,12 +58,12 @@ QLabel#section {{ color: #6b7385; font-size: 8.5pt; font-weight: 600; letter-spa
 QLabel#hint {{ color: #6b7385; font-size: 9pt; }}
 QFrame#card {{ background: #ffffff; border: 1px solid #e3e6ee; border-radius: 10px; }}
 QLabel#cardTitle {{ font-weight: 600; }}
-QPlainTextEdit {{ border: none; background: #ffffff; font-size: 11.5pt; selection-background-color: #c9d6ff; }}
+QPlainTextEdit {{ border: none; background: #ffffff; font-size: 11.5pt; selection-background-color: #cbe8da; }}
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
     background: #ffffff; border: 1px solid #d5d9e3; border-radius: 6px; padding: 4px 8px; min-height: 22px; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ image: url({ASSETS}/arrow-down.svg); width: 10px; height: 6px; }}
-QComboBox QAbstractItemView {{ border: 1px solid #d5d9e3; selection-background-color: #e6ecfb;
+QComboBox QAbstractItemView {{ border: 1px solid #d5d9e3; selection-background-color: #e1f0e8;
                                selection-color: #1f2430; outline: none; }}
 QSpinBox, QDoubleSpinBox {{ padding-right: 24px; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button {{
@@ -73,7 +77,7 @@ QPushButton {{ background: #ffffff; border: 1px solid #d5d9e3; border-radius: 6p
 QPushButton:hover {{ background: #eef1f8; }}
 QPushButton:pressed {{ background: #e2e7f3; }}
 QPushButton#primary {{ background: {ACCENT}; color: #ffffff; border: 1px solid {ACCENT}; font-weight: 600; }}
-QPushButton#primary:hover {{ background: #2848ad; }}
+QPushButton#primary:hover {{ background: #14603f; }}
 QPushButton:disabled {{ color: #9aa1b2; }}
 QPushButton#primary:disabled {{ background: #8ea3e0; border-color: #8ea3e0; color: #ffffff; }}
 QSlider::groove:horizontal {{ height: 4px; background: #dfe3ec; border-radius: 2px; }}
@@ -90,7 +94,7 @@ QSplitter::handle {{ background: transparent; }}
 QLabel#logo {{ background: {ACCENT}; border-radius: 9px; }}
 QPushButton#sectionHead {{ text-align: left; border: none; background: transparent; padding: 9px 10px;
                           font-weight: 600; border-radius: 8px; icon-size: 16px; }}
-QPushButton#sectionHead:hover {{ background: #f2f5fd; }}
+QPushButton#sectionHead:hover {{ background: #eaf4ef; }}
 QLabel#sectionSummary {{ color: #6b7385; font-size: 9pt; }}
 QFrame#card QFrame#cardHead {{ border: none; border-bottom: 1px solid #eef0f4; border-radius: 0; background: transparent; }}
 QLabel#cardFoot {{ color: #6b7385; font-size: 9pt; padding: 6px 14px; border-top: 1px solid #eef0f4; }}
@@ -108,28 +112,34 @@ QToolButton#viewerTool:hover {{ background: #eef1f8; }}
 QLabel#viewerLabel {{ font-size: 9.5pt; }}
 QFrame#viewerSep {{ background: #e3e6ee; border: none; }}
 QPushButton#viewerFit {{ padding: 4px 10px; font-size: 9pt; }}
+QPushButton#viewerFit:checked {{ background: #e1f0e8; border-color: {ACCENT}; }}
 QScrollArea#pagesArea, QScrollArea#pagesArea > QWidget {{ background: #e9ebf0; border: none; }}
 QLabel#viewerHint {{ color: #6b7385; font-size: 12pt; background: transparent; }}
 QListWidget#thumbs {{ background: #fafbfc; border: none; border-top: 1px solid #eef0f4; padding: 4px 8px;
                      outline: none; }}
 QListWidget#thumbs::item {{ color: #6b7385; border-radius: 6px; padding: 3px; }}
-QListWidget#thumbs::item:selected {{ background: #e6ecfb; color: #1f2430; }}
+QListWidget#thumbs::item:selected {{ background: #e1f0e8; color: #1f2430; }}
 QDialog#fullView {{ background: #e9ebf0; }}
-QDialog#printWizard {{ background: #ffffff; }}
-QFrame#wizHead {{ border-bottom: 1px solid #eef0f4; }}
-QLabel#wizTitle {{ font-size: 13pt; font-weight: 600; }}
-QFrame#wizBar {{ background: #dfe3ec; border-radius: 2px; }}
-QFrame#wizBar[state="on"] {{ background: {ACCENT}; }}
-QFrame#wizScene {{ background: #f7f8fb; border-right: 1px solid #eef0f4; }}
-QScrollArea#wizList, QScrollArea#wizList > QWidget > QWidget {{ background: transparent; }}
-QFrame#wizStep {{ border-radius: 10px; background: transparent; }}
-QFrame#wizStep[state="on"] {{ background: #f2f5fd; }}
-QLabel#wizDot {{ border: 2px solid #c9cfdc; border-radius: 12px; color: #5e6678; font-weight: 600; font-size: 9pt; }}
-QLabel#wizDot[state="on"] {{ background: {ACCENT}; border-color: {ACCENT}; color: #ffffff; }}
-QLabel#wizDot[state="done"] {{ background: #2e9e5b; border-color: #2e9e5b; color: #ffffff; }}
-QLabel#wizStepTitle {{ font-weight: 600; }}
-QLabel#wizTip {{ background: #fff7ec; border-radius: 10px; padding: 10px 12px; color: #4a5265; font-size: 9pt; }}
-QFrame#wizFoot {{ border-top: 1px solid #eef0f4; }}
+QFrame#rail {{ background: #1d2230; }}
+QToolButton#railButton {{ color: #aab3c5; background: transparent; border: none; border-radius: 12px;
+                         font-size: 9pt; padding: 6px 0; }}
+QToolButton#railButton:hover {{ background: #2a3142; color: #ffffff; }}
+QToolButton#railButton:checked {{ background: #2f3a52; color: #ffffff; }}
+QWidget#page {{ background: #f3f5f8; }}
+QFrame#planPanel {{ background: #f3f5f8; border-right: 1px solid #e4e8ef; }}
+QWidget#printPage {{ background: #f7f8fb; }}
+QLabel#planTitle {{ font-size: 13pt; font-weight: 600; }}
+QScrollArea#planList, QScrollArea#planList > QWidget > QWidget {{ background: transparent; }}
+QFrame#planStep {{ border-radius: 12px; background: transparent; border: 1px solid transparent; }}
+QFrame#planStep[state="on"] {{ background: #ffffff; border-color: #cfe6dc; }}
+QFrame#planStep[state="done"] QLabel {{ color: #8a92a3; }}
+QLabel#planDot {{ border-radius: 10px; background: #e8edf3; color: #4d5568; font-weight: 600; }}
+QLabel#planDot[state="on"] {{ background: {ACCENT}; color: #ffffff; }}
+QLabel#planDot[state="done"] {{ background: #cfe6dc; color: {ACCENT}; }}
+QLabel#planStepTitle {{ font-weight: 600; }}
+QFrame#printSettings {{ border-top: 1px solid #e4e8ef; }}
+QLabel#stepTitle {{ font-size: 17pt; font-weight: 600; }}
+QLabel#stepText {{ color: #4d5568; font-size: 10.5pt; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #c9ceda; border-radius: 3px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
@@ -161,6 +171,34 @@ def page_size(key: str, spread: bool = False) -> QPageSize:
         return QPageSize(QPageSize.A5)
     w, h = sv.FORMAT_BY_KEY[key].size_mm
     return QPageSize(QSizeF(w, h), QPageSize.Millimeter, "Тетрадный листок", QPageSize.ExactMatch)
+
+
+def step_pixmap(n: int, state: str, size: int = 30) -> QPixmap:
+    """Кружок с номером шага на полосе слева: пройденный — зелёный с галочкой."""
+    ratio = 2
+    pm = QPixmap(size * ratio, size * ratio)
+    pm.fill(Qt.transparent)
+    pm.setDevicePixelRatio(ratio)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    r = QRectF(1.5, 1.5, size - 3, size - 3)
+    color = QColor("#ffffff") if state == "on" else QColor("#aab3c5")
+    if state == "done":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#1f8a62"))
+        p.drawEllipse(r)
+        p.drawPixmap(QRectF(7, 7, size - 14, size - 14).toRect(), icons.pixmap("check", "#ffffff", size - 14))
+    else:
+        p.setPen(QPen(color, 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(r)
+        f = QFont()
+        f.setPixelSize(13)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(r, Qt.AlignCenter, str(n))
+    p.end()
+    return pm
 
 
 def to_qimage(im) -> QImage:
@@ -880,50 +918,23 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.setStyleSheet(STYLE)
 
-        # шапка: название и главные действия
-        header = QFrame(objectName="header")
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(18, 10, 18, 10)
-        hl.setSpacing(10)
-        logo = QLabel(objectName="logo")
-        logo.setFixedSize(34, 34)
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setPixmap(icons.pixmap("pen", "#ffffff", 18))
-        hl.addWidget(logo)
-        titles = QVBoxLayout()
-        titles.setSpacing(0)
-        titles.addWidget(QLabel(APP_NAME, objectName="title"))
-        self.subtitle = QLabel("Текст вашим почерком, готовый к печати", objectName="subtitle")
-        titles.addWidget(self.subtitle)
-        hl.addLayout(titles)
-        hl.addStretch(1)
-        self.regen_btn = QPushButton("Другой вариант")
-        self.regen_btn.setIcon(icons.icon("refresh"))
-        self.regen_btn.setToolTip("Тот же текст, но написанный по-другому (Ctrl+R)")
-        self.regen_btn.clicked.connect(self.next_variant)
-        self.pdf_btn = QPushButton("PDF")
-        self.pdf_btn.setIcon(icons.icon("download"))
-        self.pdf_btn.setToolTip("Сохранить конспект в PDF (Ctrl+S)")
-        self.pdf_btn.clicked.connect(self.save_pdf)
-        self.print_btn = QPushButton("Печать…", objectName="primary")
-        self.print_btn.setIcon(icons.icon("printer", "#ffffff"))
-        self.print_btn.setToolTip("Ctrl+P")
-        self.print_btn.clicked.connect(self.print_pages)
-        for b in (self.regen_btn, self.pdf_btn, self.print_btn):
-            b.setMinimumHeight(34)
-            hl.addWidget(b)
-
-        # боковая панель настроек
-        side = QWidget(objectName="sidebarBox")
-        side_l = QVBoxLayout(side)
-        side_l.setContentsMargins(10, 8, 10, 14)
-        side_l.setSpacing(2)
+        # панели настроек справа на шагах «Текст» и «Вид»
         self.sections: dict[str, Section] = {}
 
-        def section(title, icon):
+        def panel():
+            box = QWidget(objectName="sidebarBox")
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(10, 8, 10, 14)
+            lay.setSpacing(2)
+            return box, lay
+
+        text_side, text_side_l = panel()
+        view_side, view_side_l = panel()
+
+        def section(title, icon, target):
             sec = Section(title, icon, self.qs.value(f"open_{icon}", "true") in (True, "true"))
             sec.toggled.connect(lambda on, k=icon: self.qs.setValue(f"open_{k}", on))
-            side_l.addWidget(sec)
+            target.addWidget(sec)
             self.sections[title] = sec
             return sec.body_layout
 
@@ -940,7 +951,7 @@ class MainWindow(QMainWindow):
             sl.addWidget(lab)
             return lab
 
-        sl = section("Почерк", "pen")
+        sl = section("Почерк", "pen", text_side_l)
         self.profile_box = QComboBox()
         self.profile_box.currentIndexChanged.connect(self._profile_changed)
         sl.addWidget(self.profile_box)
@@ -968,7 +979,7 @@ class MainWindow(QMainWindow):
         row2.addWidget(draw, 1)
         sl.addLayout(row2)
 
-        sl = section("Бумага", "paper")
+        sl = section("Бумага", "paper", view_side_l)
         self.page_box = QComboBox()
         for f in sv.FORMATS:
             self.page_box.addItem(f.title, f.key)
@@ -982,7 +993,7 @@ class MainWindow(QMainWindow):
             self.margin_box.addItem(title, key)
         field("Красное поле", self.margin_box)
 
-        sl = section("Письмо", "lines")
+        sl = section("Письмо", "lines", view_side_l)
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(1, 9999)
         self.seed_spin.setPrefix("Вариант ")
@@ -1040,7 +1051,11 @@ class MainWindow(QMainWindow):
         self.show_missing = QCheckBox("Подсветить буквы без образцов")
         sl.addWidget(self.show_missing)
 
-        sl = section("Печать", "printer")
+        print_settings = QWidget()
+        sl = QVBoxLayout(print_settings)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        sl.addWidget(QLabel("НАСТРОЙКИ ПЕЧАТИ", objectName="section"))
         self.on_clean = QRadioButton("На чистый лист\n(клетка печатается)")
         self.real_paper = QRadioButton("На настоящий тетрадный листок\n(печатается только текст)")
         self.on_clean.setChecked(True)
@@ -1075,17 +1090,50 @@ class MainWindow(QMainWindow):
         self.flip_back.setToolTip("Включите, если на обороте текст вышел перевёрнутым: "
                                   "зависит от того, как принтер берёт листок.")
         sl.addWidget(self.flip_back)
-        side_l.addStretch(1)
+        text_side_l.addStretch(1)
+        view_side_l.addStretch(1)
 
-        side_scroll = QScrollArea(objectName="sidebar")
-        side_scroll.setWidget(side)
-        side_scroll.setWidgetResizable(True)
-        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        side_frame = QFrame(objectName="sidebarFrame")
-        sfl = QVBoxLayout(side_frame)
-        sfl.setContentsMargins(0, 0, 0, 0)
-        sfl.addWidget(side_scroll)
-        side_frame.setFixedWidth(310)
+        def side_scroll(box):
+            sc = QScrollArea(objectName="sidebar")
+            sc.setWidget(box)
+            sc.setWidgetResizable(True)
+            sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            fr = QFrame(objectName="sidebarFrame")
+            fl = QVBoxLayout(fr)
+            fl.setContentsMargins(0, 0, 0, 0)
+            fl.addWidget(sc)
+            fr.setFixedWidth(300)
+            return fr
+
+        def page_head(title, subtitle_label, buttons):
+            head = QFrame(objectName="header")
+            hl = QHBoxLayout(head)
+            hl.setContentsMargins(22, 10, 18, 10)
+            hl.setSpacing(10)
+            titles = QVBoxLayout()
+            titles.setSpacing(0)
+            titles.addWidget(QLabel(title, objectName="title"))
+            titles.addWidget(subtitle_label)
+            hl.addLayout(titles)
+            hl.addStretch(1)
+            for b in buttons:
+                b.setMinimumHeight(34)
+                hl.addWidget(b)
+            return head
+
+        def page(head, *widgets):
+            w = QWidget(objectName="page")
+            pl = QVBoxLayout(w)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.setSpacing(0)
+            pl.addWidget(head)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(0)
+            for wd, stretch in widgets:
+                row.addWidget(wd, stretch)
+            pl.addLayout(row, 1)
+            return w
 
         # текст
         text_card = QFrame(objectName="card")
@@ -1096,7 +1144,6 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout(top_box)
         top.setContentsMargins(14, 8, 10, 8)
         top.setSpacing(6)
-        top.addWidget(QLabel("Текст", objectName="cardTitle"))
         top.addStretch(1)
         insert_btn = QPushButton("Вставить ▾", objectName="small")
         insert_btn.setToolTip("Дата, тема, вопрос с номером, подчёркивание, рамка, стрелка, степень")
@@ -1125,40 +1172,96 @@ class MainWindow(QMainWindow):
         pl = QVBoxLayout(preview)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(0)
-        self.pages = PagesView()
+        self.pages = PagesView(loupe=True)
         pl.addWidget(self.pages, 1)
-        self.pages_label = QLabel(objectName="cardFoot")
-        pl.addWidget(self.pages_label)
         self.missing_label = QLabel(objectName="missing")
         self.missing_label.setWordWrap(True)
         self.missing_label.hide()
         pl.addWidget(self.missing_label)
 
-        split = QSplitter(Qt.Horizontal)
-        split.setHandleWidth(14)
-        split.addWidget(text_card)
-        split.addWidget(preview)
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
-        split.setSizes([360, 700])
+        def padded(w):
+            box = QWidget()
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(16, 16, 16, 16)
+            bl.addWidget(w)
+            return box
 
-        work = QWidget()
-        wl = QVBoxLayout(work)
-        wl.setContentsMargins(14, 14, 14, 10)
-        wl.addWidget(split)
+        # шаг 1: текст
+        to_view = QPushButton("Дальше: вид", objectName="primary")
+        to_view.setIcon(icons.icon("right", "#ffffff"))
+        to_view.setLayoutDirection(Qt.RightToLeft)
+        to_view.clicked.connect(lambda: self.go_step(1))
+        self.text_sub = QLabel(objectName="subtitle")
+        text_page = page(page_head("Текст конспекта", self.text_sub, [to_view]),
+                         (padded(text_card), 1), (side_scroll(text_side), 0))
 
-        middle = QHBoxLayout()
-        middle.setContentsMargins(0, 0, 0, 0)
-        middle.setSpacing(0)
-        middle.addWidget(side_frame)
-        middle.addWidget(work, 1)
+        # шаг 2: вид
+        self.regen_btn = QPushButton("Другой вариант")
+        self.regen_btn.setIcon(icons.icon("refresh"))
+        self.regen_btn.setToolTip("Тот же текст, но написанный по-другому (Ctrl+R)")
+        self.regen_btn.clicked.connect(self.next_variant)
+        self.pdf_btn = QPushButton("Сохранить PDF")
+        self.pdf_btn.setIcon(icons.icon("download"))
+        self.pdf_btn.setToolTip("Ctrl+S")
+        self.pdf_btn.clicked.connect(self.save_pdf)
+        self.print_btn = QPushButton("Дальше: печать", objectName="primary")
+        self.print_btn.setIcon(icons.icon("right", "#ffffff"))
+        self.print_btn.setLayoutDirection(Qt.RightToLeft)
+        self.print_btn.clicked.connect(lambda: self.go_step(2))
+        self.pages_label = QLabel(objectName="subtitle")
+        view_page = page(page_head("Как будет выглядеть", self.pages_label,
+                                   [self.regen_btn, self.pdf_btn, self.print_btn]),
+                         (padded(preview), 1), (side_scroll(view_side), 0))
+
+        # шаг 3: печать
+        self.print_page = PrintPage(print_settings, self.qs.value("face_up", "true") in (True, "true"))
+        self.print_page.start_requested.connect(self.print_pages)
+        self.print_page.back_requested.connect(lambda: self.go_step(1))
+        self.print_page.finished.connect(self._print_finished)
+        self.print_page.face_box.currentIndexChanged.connect(
+            lambda *_: self.qs.setValue("face_up", self.print_page.face_up))
+        self.print_sub = QLabel(objectName="subtitle")
+        print_page = page(page_head("Печать", self.print_sub, []), (self.print_page, 1))
+
+        self.stack = QStackedWidget()
+        for w in (text_page, view_page, print_page):
+            self.stack.addWidget(w)
+
+        # полоса шагов слева
+        rail = QFrame(objectName="rail")
+        rail.setFixedWidth(96)
+        rl = QVBoxLayout(rail)
+        rl.setContentsMargins(10, 16, 10, 16)
+        rl.setSpacing(8)
+        logo = QLabel(objectName="logo")
+        logo.setFixedSize(40, 40)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setPixmap(icons.pixmap("pen", "#ffffff", 20))
+        logo.setToolTip(APP_NAME)
+        rl.addWidget(logo, 0, Qt.AlignHCenter)
+        rl.addSpacing(16)
+        self.step_buttons: list[QToolButton] = []
+        for i, title in enumerate(("Текст", "Вид", "Печать")):
+            b = QToolButton(objectName="railButton")
+            b.setText(title)
+            b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            b.setIconSize(QSize(30, 30))
+            b.setFixedSize(76, 70)
+            b.setCheckable(True)
+            b.setToolTip(f"Шаг {i + 1}: {title.lower()} (Ctrl+{i + 1})")
+            b.clicked.connect(lambda _=False, k=i: self.go_step(k))
+            rl.addWidget(b, 0, Qt.AlignHCenter)
+            self.step_buttons.append(b)
+        rl.addStretch(1)
 
         body = QWidget(objectName="body")
-        bl = QVBoxLayout(body)
+        bl = QHBoxLayout(body)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(0)
-        bl.addWidget(header)
-        bl.addLayout(middle, 1)
+        bl.addWidget(rail)
+        bl.addWidget(self.stack, 1)
+        self._step_anim = None
+        self.go_step(0, animate=False)
         self.setCentralWidget(body)
 
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
@@ -1199,7 +1302,7 @@ class MainWindow(QMainWindow):
                             ("Письмо", f"вариант {self.seed_spin.value()}, {how}"), ("Печать", pr)):
             if title in self.sections:
                 self.sections[title].set_summary(text)
-        self.subtitle.setText(f"{name} · {self.page_box.currentText().lower()} {paper}")
+        self.text_sub.setText(f"Почерк: {name}")
 
     def _format_changed(self, *_):
         """У тетради поле снаружи, у листа — слева: ставим принятое для формата."""
@@ -1259,6 +1362,10 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("Вид")
         act(m, "Перегенерировать (следующий вариант)", self.next_variant, "Ctrl+R")
         act(m, "Обновить предпросмотр", self.refresh_preview, "F5")
+        m.addSeparator()
+        act(m, "Шаг 1: текст", lambda: self.go_step(0), "Ctrl+1")
+        act(m, "Шаг 2: вид", lambda: self.go_step(1), "Ctrl+2")
+        act(m, "Шаг 3: печать", lambda: self.go_step(2), "Ctrl+3")
 
     # ---------- настройки ----------
 
@@ -1555,6 +1662,8 @@ class MainWindow(QMainWindow):
         text = self.text_edit.toPlainText()
         if self.profile is None:
             self.pages_label.clear()
+            self.last_rendered = None
+            self._update_plan()
             if getattr(self, "profile_errors", None):
                 self.pages.show_hint("Профиль почерка не открылся:\n\n" + "\n".join(self.profile_errors)
                                      + f"\n\nПапка профилей: {self.profiles_dir}")
@@ -1565,7 +1674,9 @@ class MainWindow(QMainWindow):
             return
         if not text.strip():
             self.pages_label.clear()
-            self.pages.show_hint("Вставьте текст слева — здесь появятся страницы.")
+            self.last_rendered = None
+            self._update_plan()
+            self.pages.show_hint("Вставьте текст на шаге «Текст» — здесь появятся страницы.")
             self._set_missing(set())
             return
         self._generation += 1
@@ -1594,7 +1705,10 @@ class MainWindow(QMainWindow):
                    else "сложить стопкой по порядку" if k > 1 else "сначала наружная сторона, потом внутренняя")
             self.pages_label.setText(f"{k} {_plural(k, 'двойной листок', 'двойных листка', 'двойных листков')}: {how}")
         else:
-            self.pages_label.setText(f"{n} {_plural(n, 'страница', 'страницы', 'страниц')}")
+            self.pages_label.setText(f"{n} {_plural(n, 'страница', 'страницы', 'страниц')} · "
+                                     f"{self.page_box.currentText().lower()}, {self.paper_box.currentText().lower()}")
+        self.last_rendered = r
+        self._update_plan()
         self.statusBar().clearMessage()
 
     def _set_missing(self, missing: set[str]):
@@ -1621,8 +1735,10 @@ class MainWindow(QMainWindow):
                   "Сохранение PDF…")
 
     def print_pages(self):
+        """Выбор принтера и начало печати по шагам (страница «Печать»)."""
         if not self._need_profile() or not self.text_edit.toPlainText().strip():
             return
+        self.go_step(2)
         opts = self.options()
         printer = QPrinter(QPrinter.HighResolution)
         orient = QPageLayout.Landscape if opts.use_spread else QPageLayout.Portrait
@@ -1635,62 +1751,99 @@ class MainWindow(QMainWindow):
                   lambda r: self._paint_to_printer(printer, r), "Подготовка страниц к печати…")
 
     def _paint_to_printer(self, printer: QPrinter, r: sv.Rendered, ask_flip: bool = True):
-        if ask_flip and (r.is_spread or self.real_paper.isChecked()):
-            self._print_wizard(printer, r)
+        if ask_flip:
+            self.go_step(2)
+            self.print_page.set_plan(self.print_steps(printer, r), True, self._plan_subtitle(r, printer))
             return
+        # Без шагов (проверки): все стороны подряд, как их печатал бы человек.
         if not r.is_spread:
-            if self._paint_images(printer, r.images):
-                self.statusBar().showMessage(f"Отправлено на печать: {len(r.images)} стр.", 8000)
+            self._paint_images(printer, r.images)
             return
-        # Без вопросов (проверки): все стороны подряд, как их печатал бы человек.
         for outer, inner in r.sheets():
             if not self._paint_images(printer, [r.images[outer]]):
                 return
             if inner is not None and not self._paint_images(printer, [r.images[inner]]):
                 return
 
-    def print_steps(self, printer: QPrinter, r: sv.Rendered) -> list[PrintStep]:
-        """Шаги печати на настоящую бумагу с картинками для окна-помощника."""
-        def small(im) -> QImage:  # для анимации хватит маленькой копии
-            q = to_qimage(im)
+    def _plan_subtitle(self, r: sv.Rendered, printer: QPrinter | None = None) -> str:
+        if r.is_spread:
+            n = len(r.sheets())
+            sides = sum(1 + (inner is not None) for _, inner in r.sheets())
+            text = (f"{n} {_plural(n, 'двойной листок', 'двойных листка', 'двойных листков')} · "
+                    f"{sides} {_plural(sides, 'заход', 'захода', 'заходов')} в принтер")
+        else:
+            n = len(r.images)
+            text = f"{n} {_plural(n, 'страница', 'страницы', 'страниц')}"
+        return text + (f" · {printer.printerName()}" if printer is not None and printer.printerName() else "")
+
+    def _print_finished(self, done: bool):
+        if self.print_page.printed:
+            self.statusBar().showMessage("Печать: готово." if done else "Печать остановлена.", 8000)
+        self._update_plan()
+
+    def _update_plan(self):
+        """План печати по последнему предпросмотру: видно, что и как будет печататься."""
+        if self.print_page.running:
+            return
+        r = getattr(self, "last_rendered", None)
+        if r is None or not r.images:
+            self.print_page.set_plan([], False, "")
+            self.print_sub.setText("")
+            return
+        self.print_page.set_plan(self.print_steps(None, r), False, self._plan_subtitle(r))
+        self.print_sub.setText(self._plan_subtitle(r))
+
+    def print_steps(self, printer: QPrinter | None, r: sv.Rendered) -> list[PrintStep]:
+        """Шаги печати с картинками. Без принтера — только план, без действий."""
+        def small(im) -> QImage:  # для анимации и плана хватит маленькой копии
+            q = im if isinstance(im, QImage) else to_qimage(im)
             return q.scaledToWidth(min(q.width(), 700), Qt.SmoothTransformation)
 
         def job(images):
-            return lambda: self._paint_images(printer, images)
+            return None if printer is None else (lambda: self._paint_images(printer, images))
 
         if not r.is_spread:
             n = len(r.images)
-            sheet = "тетрадный листок" if self.page_box.currentData() == "notebook" else "лист"
             first = small(r.images[0])
+            count = f"{n} {_plural(n, 'страницу', 'страницы', 'страниц')}"
+            if self.real_paper.isChecked():
+                sheet = "тетрадный листок" if self.page_box.currentData() == "notebook" else "лист"
+                return [
+                    PrintStep(f"Положите {sheet} в лоток",
+                              "Верхним краем вперёд, как на картинке. "
+                              + (f"Листки по одному: напечатается {count}." if n > 1 else "Напечатается одна страница."),
+                              "insert", first, "Печатать", job(r.images), spread=False, mini=first),
+                    PrintStep("Проверьте, легли ли строки в клетки",
+                              "Если текст съехал, поправьте «Сдвиг под принтер» и напечатайте снова.",
+                              "done", first, "Готово", spread=False),
+                ]
             return [
-                PrintStep(f"Положите {sheet} в лоток",
-                          "Как бумагу нужного размера, верхним краем вперёд (на картинке он оранжевый). "
-                          + ("Листки по одному: принтер напечатает " + f"{n} {_plural(n, 'страницу', 'страницы', 'страниц')}."
-                             if n > 1 else "Печатается одна страница."),
-                          "insert", first, "Печатать", job(r.images), spread=False),
-                PrintStep("Проверьте, легли ли строки в клетки",
-                          "Если текст съехал, поправьте «Сдвиг под принтер» в разделе «Печать» и напечатайте снова.",
-                          "done", first, "Готово", spread=False),
+                PrintStep("Положите чистую бумагу в лоток",
+                          f"Клетка и поля напечатаются вместе с текстом. Напечатается {count}.",
+                          "insert", first, "Печатать", job(r.images), spread=False, mini=first),
+                PrintStep("Готово", "Листы выйдут по порядку, первая страница сверху.", "done", first, "Готово",
+                          spread=False),
             ]
         steps = []
         sheets = r.sheets()
         n = len(sheets)
         for i, (outer, inner) in enumerate(sheets):
-            pages = r.labels[outer].split(": ", 1)[-1]
-            head = f"Листок {i + 1} из {n}: " if n > 1 else ""
-            more = " Подпишите карандашом в уголке номер листка, чтобы их не перепутать." if n > 1 else ""
+            head = f"Листок {i + 1}: " if n > 1 else ""
+            more = " Подпишите карандашом в уголке номер листка." if n > 1 else ""
+            outer_img = small(r.images[outer])
             steps.append(PrintStep(
-                head + ("вставьте чистый двойной листок" if i == 0 else "вставьте следующий чистый листок"),
-                "Развёрнутым, узкой стороной в лоток, как на картинке." + more,
-                "insert", small(r.images[outer]), "Печатать наружную сторону", job([r.images[outer]])))
+                head + ("положите чистый двойной листок" if i == 0 else "положите следующий чистый листок"),
+                "Развёрнутым, узкой стороной в лоток, как на картинке. Напечатается: "
+                + r.labels[outer].split(": ", 1)[-1] + "." + more,
+                "insert", outer_img, "Печатать наружную сторону", job([r.images[outer]]), mini=outer_img))
             if inner is None:
                 continue
             steps.append(PrintStep(
                 head + "переверните листок",
-                "Дайте чернилам высохнуть. Положите листок напечатанной стороной {лицом}, "
-                "оранжевым краем снова вперёд. Напечатается: " + r.labels[inner].split(": ", 1)[-1] + ".",
-                "flip", small(r.images[outer]), "Печатать внутреннюю сторону", job([r.images[inner]])))
-            steps[-2].text += f" Напечатается: {pages}."
+                "Напечатанной стороной {лицом}, оранжевым краем снова вперёд. Дайте чернилам высохнуть. "
+                "Напечатается: " + r.labels[inner].split(": ", 1)[-1] + ".",
+                "flip", outer_img, "Печатать внутреннюю сторону", job([r.images[inner]]),
+                mini=small(r.images[inner])))
         if n > 1 and self.nested_box.isChecked():
             done = ("Листок 1 снаружи, в него вложите листок 2" + (", в него листок 3" if n > 2 else "")
                     + (" и так далее" if n > 3 else "") + ". Сложите пополам — страницы пойдут по порядку.")
@@ -1703,21 +1856,30 @@ class MainWindow(QMainWindow):
             st.title = st.title[:1].upper() + st.title[1:]
         return steps
 
-    def _print_wizard(self, printer: QPrinter, r: sv.Rendered) -> None:
-        steps = self.print_steps(printer, r)
-        if r.is_spread:
-            n = len(r.sheets())
-            title = "Печать на двойной листок"
-            sub = f"{n} {_plural(n, 'двойной листок', 'двойных листка', 'двойных листков')} · {printer.printerName()}"
-        else:
-            title = "Печать на тетрадный листок" if self.page_box.currentData() == "notebook" else "Печать"
-            sub = printer.printerName()
-        wiz = PrintWizard(self, title, sub, steps, self.qs.value("face_up", "true") in (True, "true"))
-        wiz.exec()
-        self.qs.setValue("face_up", wiz.face_up)
-        if wiz.printed:
-            self.statusBar().showMessage("Печать: готово." if wiz.result() == QDialog.Accepted
-                                         else "Печать остановлена.", 8000)
+    # ---------- шаги ----------
+
+    def go_step(self, k: int, animate: bool = True):
+        """Шаг 1 «Текст», 2 «Вид», 3 «Печать» (k = 0, 1, 2)."""
+        if self.stack.currentIndex() != k or not animate:
+            self.stack.setCurrentIndex(k)
+            if animate:  # новая страница проявляется
+                w = self.stack.currentWidget()
+                eff = QGraphicsOpacityEffect(w)
+                w.setGraphicsEffect(eff)
+                self._step_anim = QPropertyAnimation(eff, b"opacity", self)
+                self._step_anim.setDuration(200)
+                self._step_anim.setStartValue(0.2)
+                self._step_anim.setEndValue(1.0)
+                self._step_anim.finished.connect(lambda w=w: w.setGraphicsEffect(None))
+                self._step_anim.start()
+        for i, b in enumerate(self.step_buttons):
+            state = "on" if i == k else "done" if i < k else ""
+            b.setChecked(i == k)
+            b.setIcon(QIcon(step_pixmap(i + 1, state)))
+        if k == 0:
+            self.text_edit.setFocus()
+        elif k == 2:
+            self._update_plan()
 
     def _paint_images(self, printer: QPrinter, images) -> bool:
         painter = QPainter()

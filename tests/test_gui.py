@@ -54,7 +54,7 @@ def test_format_switch_sets_margin_and_pitch(window):
     window.paper_box.setCurrentIndex(window.paper_box.findData("grid"))
     assert window.pitch_spin.value() == 10.0
     window.real_paper.setChecked(True)
-    assert window.off_x.isVisibleTo(window)
+    assert window.off_x.isVisibleTo(window.print_page)
     assert window.options().real_paper
 
 
@@ -119,7 +119,7 @@ def test_print_is_real_size(app, window, profile, tmp_path):
     printer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, printer.pageLayout().margins()))
     printer.setFullPage(True)
     pages = sv.render_text("Ощущение — это отражение свойств.", profile, sv.Options(page="A4"), dpi=72)
-    window._paint_to_printer(printer, pages)
+    window._paint_to_printer(printer, pages, ask_flip=False)
     with pymupdf.open(out) as d:
         assert d.page_count == 1
         assert abs(d[0].rect.width / 72 * 25.4 - 210) < 1.5
@@ -129,7 +129,7 @@ def test_print_is_real_size(app, window, profile, tmp_path):
     printer.setPageLayout(QPageLayout(gui.page_size("notebook"), QPageLayout.Portrait,
                                       printer.pageLayout().margins()))
     pages = sv.render_text("Ощущение.", profile, sv.Options(page="notebook", real_paper=True), 72, True)
-    window._paint_to_printer(printer, pages)
+    window._paint_to_printer(printer, pages, ask_flip=False)
     with pymupdf.open(out2) as d:
         assert abs(d[0].rect.width / 72 * 25.4 - 170) < 1.5
         assert abs(d[0].rect.height / 72 * 25.4 - 205) < 1.5
@@ -375,12 +375,34 @@ def test_print_wizard_steps(app, window, profile, tmp_path):
     assert all(s.action() for s in steps if s.action)
     with pymupdf.open(out) as d:
         assert d.page_count == 1  # каждый заход в принтер — отдельное задание
-    wiz = gui.PrintWizard(window, "Печать", "", steps)
-    wiz._advance()
-    assert wiz.index == 1 and wiz.rows[0][1].text() == "✓"
-    wiz.face_box.setCurrentIndex(1)
-    assert "вверх" in wiz.rows[1][3].text()
-    wiz.close()
+    page = window.print_page
+    page.set_plan(steps, True)
+    assert window.stack.currentIndex() == 0
+    page._advance()
+    assert page.index == 1 and page.rows[0][1].text() == "✓"
+    page.face_box.setCurrentIndex(1)
+    assert "вверх" in page.text.text()
+    page.stop()
+    assert not page.running and page.next_btn.text() == "Начать печать…"
+
+
+def test_steps_and_plan(app, window):
+    window.text_edit.setPlainText("Ощущение и восприятие.")
+    window.go_step(1)
+    assert window.stack.currentIndex() == 1 and window.step_buttons[1].isChecked()
+    window.refresh_preview()
+    wait_idle(app, window)
+    window.go_step(2)
+    plan = window.print_page
+    assert plan.steps and not plan.running
+    assert all(s.action is None for s in plan.steps)  # без принтера — только план
+    window.real_paper.setChecked(True)
+    window.spread_box.setChecked(True)
+    window.refresh_preview()
+    wait_idle(app, window)
+    assert [s.scene for s in plan.steps][-1] == "fold"
+    plan.back_btn.click()
+    assert window.stack.currentIndex() == 1
 
 
 def test_print_wizard_single_sheet(app, window, profile, tmp_path):
@@ -390,6 +412,7 @@ def test_print_wizard_single_sheet(app, window, profile, tmp_path):
     printer = QPrinter(QPrinter.HighResolution)
     printer.setOutputFormat(QPrinter.PdfFormat)
     printer.setOutputFileName(str(tmp_path / "листок.pdf"))
+    window.real_paper.setChecked(True)
     steps = window.print_steps(printer, r)
     assert [s.scene for s in steps] == ["insert", "done"]
     assert steps[0].action()

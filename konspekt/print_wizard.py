@@ -1,7 +1,7 @@
-"""Пошаговая печать на настоящую бумагу: картинка показывает, как положить
+"""Пошаговая печать: картинка показывает, как положить
 листок, куда он уходит, как его перевернуть и сложить.
 
-Окно ничего не знает про почерк: MainWindow передаёт ему шаги (PrintStep),
+Страница ничего не знает про почерк: MainWindow передаёт ей шаги (PrintStep),
 а печать делает функция шага.
 """
 
@@ -9,15 +9,15 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from . import icons
 
-ACCENT = "#3156c8"
+ACCENT = "#1b7a57"
 EDGE = QColor("#f08a24")  # край, который идёт в принтер первым
 INK = QColor("#2d3446")
 
@@ -31,6 +31,7 @@ class PrintStep:
     button: str = "Дальше"
     action: Callable[[], bool] | None = None  # печать; False — остаться на шаге
     spread: bool = True  # двойной листок (иначе одна страница)
+    mini: QImage | None = None  # миниатюра того, что напечатается на этом шаге (для плана)
 
 
 class PrintScene(QWidget):
@@ -138,7 +139,6 @@ class PrintScene(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        p.fillRect(self.rect(), QColor("#f7f8fb"))
         cx = self.width() / 2
         t = self.t
         w, h = self._sheet_size()
@@ -232,162 +232,218 @@ class PrintScene(QWidget):
         p.restore()
 
 
-class PrintWizard(QDialog):
-    """Шаги печати: слева картинка, справа список шагов, внизу кнопки."""
+class PrintPage(QWidget):
+    """Шаг «Печать»: слева план (все заходы в принтер) и настройки печати,
+    справа текущий шаг крупно, с анимацией.
 
-    def __init__(self, parent, title: str, subtitle: str, steps: list[PrintStep], face_up: bool = True):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setObjectName("printWizard")
-        self.steps = steps
+    Пока печать не начата, план показывает, что будет, а кнопка начинает
+    печать (start_requested). Во время печати кнопка выполняет шаг."""
+
+    start_requested = Signal()
+    back_requested = Signal()
+    finished = Signal(bool)  # True — дошли до конца
+
+    def __init__(self, settings: QWidget | None = None, face_up: bool = True):
+        super().__init__()
+        self.setObjectName("printPage")
+        self.steps: list[PrintStep] = []
         self.index = 0
-        self.printed = 0  # сколько шагов с печатью выполнено
-        self.resize(900, 600)
+        self.running = False
+        self.printed = 0  # сколько заходов в принтер уже сделано
+        self.rows: list[tuple[QFrame, QLabel, QLabel, QLabel, QLabel]] = []
 
-        lay = QVBoxLayout(self)
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        head = QFrame(objectName="wizHead")
-        hl = QHBoxLayout(head)
-        hl.setContentsMargins(24, 16, 24, 16)
-        tl = QVBoxLayout()
-        tl.setSpacing(2)
-        tl.addWidget(QLabel(title, objectName="wizTitle"))
-        tl.addWidget(QLabel(subtitle, objectName="hint"))
-        hl.addLayout(tl)
-        hl.addStretch(1)
-        self.bars: list[QFrame] = []
-        for _ in steps:
-            b = QFrame(objectName="wizBar")
-            b.setFixedSize(26 if len(steps) < 9 else 14, 5)
-            hl.addWidget(b)
-            self.bars.append(b)
-        lay.addWidget(head)
-
-        mid = QHBoxLayout()
-        mid.setSpacing(0)
-        self.scene = PrintScene()
-        self.scene.face_up = face_up
-        sw = QFrame(objectName="wizScene")
-        sl = QVBoxLayout(sw)
-        sl.setContentsMargins(20, 10, 20, 10)
-        sl.addWidget(self.scene)
-        sw.setFixedWidth(420)
-        mid.addWidget(sw)
-
-        right = QWidget()
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(20, 18, 24, 12)
-        rl.setSpacing(4)
-        self.rows: list[tuple[QFrame, QLabel, QLabel, QLabel]] = []
-        listbox = QWidget()
-        ll = QVBoxLayout(listbox)
-        ll.setContentsMargins(0, 0, 0, 0)
+        left = QFrame(objectName="planPanel")
+        left.setFixedWidth(400)
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(20, 20, 16, 16)
         ll.setSpacing(4)
-        for st in steps:
-            row = QFrame(objectName="wizStep")
-            row_l = QHBoxLayout(row)
-            row_l.setContentsMargins(12, 9, 12, 9)
-            row_l.setSpacing(12)
-            dot = QLabel(objectName="wizDot")
-            dot.setFixedSize(24, 24)
-            dot.setAlignment(Qt.AlignCenter)
-            row_l.addWidget(dot, 0, Qt.AlignTop)
-            texts = QVBoxLayout()
-            texts.setSpacing(2)
-            t1 = QLabel(st.title, objectName="wizStepTitle")
-            t2 = QLabel(st.text, objectName="hint")
-            t1.setWordWrap(True)
-            t2.setWordWrap(True)
-            texts.addWidget(t1)
-            texts.addWidget(t2)
-            row_l.addLayout(texts, 1)
-            ll.addWidget(row)
-            self.rows.append((row, dot, t1, t2))
-        ll.addStretch(1)
-        scroll = QScrollArea(objectName="wizList")
-        scroll.setWidget(listbox)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_scroll = scroll
-        rl.addWidget(scroll, 1)
-        tip = QLabel("Оранжевая полоса на картинке — край листка, который идёт в принтер первым. "
-                     "Отметьте его карандашом, чтобы не перепутать при перевороте.", objectName="wizTip")
-        tip.setWordWrap(True)
-        rl.addWidget(tip)
-        mid.addWidget(right, 1)
-        lay.addLayout(mid, 1)
+        ll.addWidget(QLabel("План печати", objectName="planTitle"))
+        self.plan_sub = QLabel(objectName="hint")
+        ll.addWidget(self.plan_sub)
+        ll.addSpacing(8)
+        box = QWidget()
+        self.list_layout = QVBoxLayout(box)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setSpacing(6)
+        self.list_layout.addStretch(1)
+        self.list_scroll = QScrollArea(objectName="planList")
+        self.list_scroll.setWidget(box)
+        self.list_scroll.setWidgetResizable(True)
+        self.list_scroll.setFrameShape(QFrame.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        ll.addWidget(self.list_scroll, 1)
 
-        foot = QFrame(objectName="wizFoot")
-        fl = QHBoxLayout(foot)
-        fl.setContentsMargins(24, 12, 24, 12)
-        fl.addWidget(QLabel("Принтер печатает на стороне листка, которая в лотке"))
+        self.settings_box = QFrame(objectName="printSettings")
+        sl = QVBoxLayout(self.settings_box)
+        sl.setContentsMargins(0, 12, 0, 0)
+        sl.setSpacing(6)
+        if settings is not None:
+            sl.addWidget(settings)
+        face = QHBoxLayout()
+        face.addWidget(QLabel("Принтер печатает на стороне,\nкоторая в лотке"))
+        face.addStretch(1)
         self.face_box = QComboBox()
         self.face_box.addItem("сверху", True)
         self.face_box.addItem("снизу", False)
         self.face_box.setCurrentIndex(0 if face_up else 1)
-        self.face_box.setToolTip("Посмотрите на первый напечатанный листок: текст вышел на стороне, которая "
-                                 "лежала сверху или снизу? От этого зависит, как переворачивать листок.")
-        self.face_box.currentIndexChanged.connect(self._face_changed)
-        fl.addWidget(self.face_box)
-        fl.addStretch(1)
-        self.cancel_btn = QPushButton("Отмена")
-        self.cancel_btn.clicked.connect(self.reject)
-        self.next_btn = QPushButton(objectName="primary")
-        self.next_btn.setMinimumWidth(190)
-        self.next_btn.clicked.connect(self._next)
-        for b in (self.cancel_btn, self.next_btn):
-            b.setMinimumHeight(36)
-            fl.addWidget(b)
-        lay.addWidget(foot)
+        self.face_box.setToolTip("Посмотрите на напечатанный листок: текст вышел на стороне, которая лежала "
+                                 "в лотке сверху или снизу? От этого зависит, как переворачивать листок.")
+        self.face_box.currentIndexChanged.connect(lambda *_: self._show())
+        face.addWidget(self.face_box)
+        sl.addLayout(face)
+        ll.addWidget(self.settings_box)
+        lay.addWidget(left)
 
-        self._show()
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(30, 24, 30, 24)
+        rl.setSpacing(10)
+        rl.addStretch(1)
+        self.title = QLabel(objectName="stepTitle")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setWordWrap(True)
+        rl.addWidget(self.title)
+        self.text = QLabel(objectName="stepText")
+        self.text.setAlignment(Qt.AlignCenter)
+        self.text.setWordWrap(True)
+        rl.addWidget(self.text)
+        self.scene = PrintScene()
+        self.scene.setFixedSize(480, 420)
+        self.scene.face_up = face_up
+        rl.addWidget(self.scene, 0, Qt.AlignHCenter)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.back_btn = QPushButton("Назад")
+        self.back_btn.clicked.connect(self._back)
+        self.next_btn = QPushButton(objectName="primary")
+        self.next_btn.clicked.connect(self._next)
+        for b in (self.back_btn, self.next_btn):
+            b.setMinimumHeight(40)
+            b.setMinimumWidth(120)
+            buttons.addWidget(b)
+        self.next_btn.setMinimumWidth(230)
+        buttons.addStretch(1)
+        rl.addLayout(buttons)
+        rl.addStretch(1)
+        lay.addWidget(right, 1)
+        self.set_plan([], False)
 
     @property
     def face_up(self) -> bool:
         return bool(self.face_box.currentData())
 
-    def _face_changed(self, *_):
-        self.scene.face_up = self.face_up
+    def set_plan(self, steps: list[PrintStep], running: bool, subtitle: str = "") -> None:
+        """Новый план. running=False — только показать, что будет."""
+        self.steps, self.running, self.index, self.printed = steps, running, 0, 0
+        self.plan_sub.setText(subtitle)
+        for row in self.rows:
+            self.list_layout.removeWidget(row[0])
+            row[0].hide()
+            row[0].deleteLater()
+        self.rows = []
+        for i, st in enumerate(steps):
+            row = QFrame(objectName="planStep")
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(12, 10, 12, 10)
+            hl.setSpacing(12)
+            dot = QLabel(objectName="planDot")
+            dot.setFixedSize(34, 34)
+            dot.setAlignment(Qt.AlignCenter)
+            hl.addWidget(dot)
+            texts = QVBoxLayout()
+            texts.setSpacing(1)
+            t1 = QLabel(st.title, objectName="planStepTitle")
+            t1.setWordWrap(True)
+            t2 = QLabel(objectName="hint")
+            t2.setWordWrap(True)
+            texts.addWidget(t1)
+            texts.addWidget(t2)
+            hl.addLayout(texts, 1)
+            mini = QLabel(objectName="planMini")
+            if st.mini is not None:
+                pm = QPixmap.fromImage(st.mini.scaled(192, 116, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                pm.setDevicePixelRatio(2)
+                mini.setPixmap(pm)
+            hl.addWidget(mini)
+            self.list_layout.insertWidget(i, row)
+            self.rows.append((row, dot, t1, t2, mini))
+        self.settings_box.setVisible(not running)
         self._show()
 
     def _text(self, st: PrintStep) -> str:
         return st.text.replace("{лицом}", "вниз" if self.face_up else "вверх")
 
+    def _short(self, st: PrintStep) -> str:
+        """Подпись в плане — первая фраза описания."""
+        t = self._text(st)
+        return t.split(". ")[0].rstrip(".") if t else ""
+
     def _show(self) -> None:
-        st = self.steps[self.index]
-        for i, (row, dot, t1, t2) in enumerate(self.rows):
-            state = "on" if i == self.index else "done" if i < self.index else ""
-            row.setProperty("state", state)
-            dot.setProperty("state", state)
-            dot.setText("✓" if i < self.index else str(i + 1))
-            t2.setText(self._text(self.steps[i]))
+        self.scene.face_up = self.face_up
+        if not self.steps:
+            self.title.setText("Нечего печатать")
+            self.text.setText("Вставьте текст на шаге «Текст» — здесь появится план печати.")
+            self.next_btn.setEnabled(False)
+            self.back_btn.setText("Назад")
+            return
+        self.next_btn.setEnabled(True)
+        cur = self.index if self.running else -1
+        for i, (row, dot, t1, t2, mini) in enumerate(self.rows):
+            state = "on" if i == cur else "done" if i < cur else ""
             for w in (row, dot):
+                w.setProperty("state", state)
                 w.style().unpolish(w)
                 w.style().polish(w)
-        for i, b in enumerate(self.bars):
-            b.setProperty("state", "on" if i <= self.index else "")
-            b.style().unpolish(b)
-            b.style().polish(b)
+            dot.setText("✓" if i < cur else str(i + 1))
+            t2.setText(self._short(self.steps[i]))
+        st = self.steps[self.index]
+        self.title.setText(st.title)
+        self.text.setText(self._text(st))
+        self.scene.show_step(st.scene, st.image, st.spread)
+        if not self.running:
+            self.next_btn.setText("Начать печать…")
+            self.next_btn.setIcon(icons.icon("printer", "#ffffff"))
+            self.back_btn.setText("Назад")
+            return
+        self.back_btn.setText("Остановить" if self.index == 0 else "Назад")
         self.next_btn.setText(st.button)
         if st.action is not None:
             self.next_btn.setIcon(icons.icon("printer", "#ffffff"))
         else:
-            self.next_btn.setIcon(icons.icon("check", "#ffffff") if self.index == len(self.steps) - 1
-                                  else icons.icon("right", "#ffffff"))
-        self.scene.show_step(st.scene, st.image, st.spread)
+            self.next_btn.setIcon(icons.icon("check" if self.index == len(self.steps) - 1 else "right", "#ffffff"))
         self.list_scroll.ensureWidgetVisible(self.rows[self.index][0], 0, 40)
 
+    def _back(self) -> None:
+        if not self.running:
+            self.back_requested.emit()
+        elif self.index == 0:
+            self.stop()
+        else:
+            self.index -= 1
+            self._show()
+
+    def stop(self, done: bool = False) -> None:
+        self.running = False
+        self.index = 0
+        self.settings_box.show()
+        self._show()
+        self.finished.emit(done)
+
     def _next(self) -> None:
+        if not self.running:
+            self.start_requested.emit()
+            return
         st = self.steps[self.index]
         if st.action is None:
             self._advance()
             return
         # пока страницы уходят на принтер, показываем, как листок затягивается
         self.next_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(False)
+        self.back_btn.setEnabled(False)
         self.next_btn.setText("Отправляю на принтер…")
         self.next_btn.setIcon(QIcon())
         self.scene.show_step("print", st.image, st.spread)
@@ -402,7 +458,7 @@ class PrintWizard(QDialog):
             QApplication.restoreOverrideCursor()
         if not ok:
             self.next_btn.setEnabled(True)
-            self.cancel_btn.setEnabled(True)
+            self.back_btn.setEnabled(True)
             self._show()
             return
         self.printed += 1
@@ -410,12 +466,12 @@ class PrintWizard(QDialog):
 
     def _after_print(self) -> None:
         self.next_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(True)
+        self.back_btn.setEnabled(True)
         self._advance()
 
     def _advance(self) -> None:
         if self.index >= len(self.steps) - 1:
-            self.accept()
+            self.stop(done=True)
             return
         self.index += 1
         self._show()

@@ -5,8 +5,10 @@
 проще листать с плавным появлением и менять масштаб без пересборки окна.
 """
 
-from PySide6.QtCore import Property, QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import Property, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
     QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
     QToolButton, QVBoxLayout, QWidget,
@@ -33,6 +35,9 @@ class PagesCanvas(QWidget):
         self.rects: list[tuple[int, QRect]] = []  # (номер страницы, где нарисована)
         self._cache: dict[tuple[int, int, int], QPixmap] = {}
         self._fade = 1.0
+        self.loupe = False  # круглая лупа под курсором
+        self._mouse: QPoint | None = None
+        self.setMouseTracking(True)
 
     def get_fade(self) -> float:
         return self._fade
@@ -77,7 +82,62 @@ class PagesCanvas(QWidget):
                 p.setBrush(QColor(30, 40, 70, a))
                 p.drawRoundedRect(r.adjusted(-i, -i + 2, i, i + 4), 3 + i, 3 + i)
             p.drawPixmap(r.topLeft(), self._scaled(k, r.size()))
+        if self.loupe and self._mouse is not None:
+            self._paint_loupe(p)
         p.end()
+
+    LOUPE_R = 80
+
+    def _loupe_rect(self) -> QRect:
+        m, R = self._mouse, self.LOUPE_R
+        return QRect(m.x() - R, m.y() - R, 2 * R, 2 * R)
+
+    def _paint_loupe(self, p: QPainter) -> None:
+        m = self._mouse
+        hit = next(((k, r) for k, r in self.rects if r.contains(m)), None)
+        if hit is None:
+            return
+        k, r = hit
+        im = self.images[k]
+        shown = r.width() / im.width()  # экранных точек на точку картинки
+        zoom = min(shown * 2.5, 1.6)
+        R = self.LOUPE_R
+        cx = (m.x() - r.left()) / shown
+        cy = (m.y() - r.top()) / shown
+        half = R / zoom
+        src = QRectF(cx - half, cy - half, 2 * half, 2 * half)
+        target = QRectF(self._loupe_rect())
+        p.setOpacity(1.0)
+        p.save()
+        path = QPainterPath()
+        path.addEllipse(target)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setClipPath(path)
+        p.fillRect(target, QColor("#ffffff"))
+        p.drawImage(target, im, src)
+        p.restore()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(30, 40, 70, 60), 6))
+        p.drawEllipse(target.adjusted(-3, -3, 3, 3))
+        p.setPen(QPen(QColor("#ffffff"), 3))
+        p.drawEllipse(target)
+
+    def mouseMoveEvent(self, e):
+        if not self.loupe:
+            return
+        old = self._loupe_rect() if self._mouse is not None else None
+        self._mouse = e.position().toPoint()
+        if old is not None:
+            self.update(old.adjusted(-8, -8, 8, 8))
+        self.update(self._loupe_rect().adjusted(-8, -8, 8, 8))
+
+    def leaveEvent(self, e):
+        if self._mouse is not None:
+            r = self._loupe_rect().adjusted(-8, -8, 8, 8)
+            self._mouse = None
+            self.update(r)
 
     def mouseDoubleClickEvent(self, e):
         self.double_clicked.emit()
@@ -86,7 +146,7 @@ class PagesCanvas(QWidget):
 class PagesView(QWidget):
     """Окно просмотра: панель управления сверху, страницы, миниатюры снизу."""
 
-    def __init__(self, fullscreen_button: bool = True):
+    def __init__(self, fullscreen_button: bool = True, loupe: bool = False):
         super().__init__()
         self.setObjectName("pagesView")
         self._images: list[QImage] = []
@@ -151,6 +211,14 @@ class PagesView(QWidget):
         self.fit_btn.setToolTip("Страницы целиком в окне")
         self.fit_btn.clicked.connect(self.fit)
         bl.addWidget(self.fit_btn)
+        self.loupe_btn = None
+        if loupe:
+            self.loupe_btn = QPushButton("Лупа", objectName="viewerFit")
+            self.loupe_btn.setCheckable(True)
+            self.loupe_btn.setChecked(True)
+            self.loupe_btn.setToolTip("Наведите на страницу, чтобы разглядеть буквы")
+            self.loupe_btn.toggled.connect(self._set_loupe)
+            bl.addWidget(self.loupe_btn)
         self.full_btn = None
         if fullscreen_button:
             self.full_btn = tool("expand", "На весь экран (двойной щелчок по странице)", self.open_fullscreen)
@@ -162,6 +230,7 @@ class PagesView(QWidget):
         self.area.setWidgetResizable(False)
         self.canvas = PagesCanvas()
         self.canvas.double_clicked.connect(self.open_fullscreen)
+        self.canvas.loupe = loupe
         self.area.setWidget(self.canvas)
         self.area.viewport().installEventFilter(self)
         self.area.verticalScrollBar().valueChanged.connect(self._scrolled)
@@ -300,7 +369,13 @@ class PagesView(QWidget):
         self._place_hint()
         self._layout(keep_scroll=True)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._layout(keep_scroll=True)
+
     def eventFilter(self, obj, e):
+        if obj is self.area.viewport() and e.type() == e.Type.Resize:
+            self._layout(keep_scroll=True)
         if obj is self.area.viewport() and e.type() == e.Type.Wheel and e.modifiers() & Qt.ControlModifier:
             self.zoom_by(1 if e.angleDelta().y() > 0 else -1)
             return True
@@ -331,6 +406,10 @@ class PagesView(QWidget):
             self._current = start
             self._layout()
             self._fade_in()
+
+    def _set_loupe(self, on: bool) -> None:
+        self.canvas.loupe = on
+        self.canvas.update()
 
     def zoom_by(self, d: int) -> None:
         i = min(range(len(ZOOMS)), key=lambda j: abs(ZOOMS[j] - self._zoom))
@@ -415,7 +494,7 @@ class PagesView(QWidget):
         dlg.setObjectName("fullView")
         dl = QVBoxLayout(dlg)
         dl.setContentsMargins(0, 0, 0, 0)
-        v = PagesView(fullscreen_button=False)
+        v = PagesView(fullscreen_button=False, loupe=self.loupe_btn is not None and self.loupe_btn.isChecked())
         dl.addWidget(v)
         close = QPushButton("Закрыть (Esc)", v)
         close.clicked.connect(dlg.accept)
