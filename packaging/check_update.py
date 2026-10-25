@@ -30,16 +30,12 @@ def sha(p: Path) -> str:
 
 
 def running_from(exe: Path) -> list[int]:
+    # путь передаём через переменную: в выводе PowerShell кириллица портится
     out = subprocess.run(["powershell", "-NoProfile", "-Command",
                           "Get-Process Konspekt -ErrorAction SilentlyContinue | "
-                          "ForEach-Object { \"$($_.Id) $($_.Path)\" }"],
-                         capture_output=True, text=True).stdout
-    pids = []
-    for line in out.splitlines():
-        pid, _, path = line.strip().partition(" ")
-        if path and Path(path).resolve() == exe.resolve():
-            pids.append(int(pid))
-    return pids
+                          "Where-Object { $_.Path -eq $env:KONSPEKT_EXE } | ForEach-Object { $_.Id }"],
+                         capture_output=True, text=True, env=dict(os.environ, KONSPEKT_EXE=str(exe.resolve()))).stdout
+    return [int(x) for x in out.split()]
 
 
 def serve(root: Path) -> None:
