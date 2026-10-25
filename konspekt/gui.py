@@ -2091,6 +2091,10 @@ def _smoke(app: QApplication) -> int:
 
     assert FALLBACK_FONT.exists(), FALLBACK_FONT
     assert pyphen.Pyphen(lang="ru_RU").inserted("конспект") != "конспект"
+    import cv2
+    assert cv2.ximgproc.thinning(np.zeros((8, 8), np.uint8)).shape == (8, 8)
+    assert cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50) is not None
+    assert updates.current_version(), "сборка не записала номер версии"
     with tempfile.TemporaryDirectory() as d:
         assert save_template_pdf(Path(d) / "бланк.pdf") > 0
         w = MainWindow(Path(d) / "profiles", QSettings(str(Path(d) / "s.ini"), QSettings.IniFormat))
