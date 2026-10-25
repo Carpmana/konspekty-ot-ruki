@@ -7,3 +7,4 @@ build/
 dist/
 profiles/
 *.egg-info/
+konspekt/_build.py
