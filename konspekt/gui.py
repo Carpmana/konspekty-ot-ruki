@@ -143,6 +143,10 @@ QLabel#planStepTitle {{ font-weight: 600; }}
 QFrame#printSettings {{ border-top: 1px solid #e4e8ef; }}
 QLabel#stepTitle {{ font-size: 17pt; font-weight: 600; }}
 QLabel#stepText {{ color: #4d5568; font-size: 10.5pt; }}
+QDialog#welcome {{ background: #f7f8fb; }}
+QLabel#welcomeTitle {{ font-size: 17pt; font-weight: 600; }}
+QFrame#welcomeStep {{ background: #ffffff; border: 1px solid #e3e6ee; border-radius: 12px; }}
+QFrame#welcomeDemo {{ background: #e9f4ee; border: 1px solid #cfe6dc; border-radius: 12px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #c9ceda; border-radius: 3px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
@@ -1029,6 +1033,101 @@ class DrawDialog(QDialog):
         self._show_variants()
 
 
+WELCOME_STEPS = [
+    ("Распечатайте бланк",
+     "5 листов A4 с клетками для букв. Печатайте в реальном размере (масштаб 100%)."),
+    ("Заполните ручкой",
+     "Той ручкой, которой пишете конспекты. В каждую клетку одну букву или слово, буквы ставьте на "
+     "пунктир. Пишите как обычно, не красивее: программа повторит именно ваш почерк."),
+    ("Отсканируйте или сфотографируйте",
+     "Подойдёт телефон: ровный свет, лист целиком, видны все четыре чёрных квадрата по углам."),
+    ("Импортируйте сканы",
+     "Укажите фото или PDF и назовите почерк, например «Мой почерк». Импорт занимает около минуты, "
+     "потом можно проверить вырезанные буквы."),
+]
+
+
+class WelcomeDialog(QDialog):
+    """Подсказка при первом запуске: как получить свой почерк."""
+
+    def __init__(self, parent: "MainWindow"):
+        super().__init__(parent)
+        self.main = parent
+        self.setObjectName("welcome")
+        self.setWindowTitle("С чего начать")
+        self.setFixedWidth(680)
+        lay = QVBoxLayout(self)
+        lay.setSizeConstraint(QVBoxLayout.SetMinimumSize)
+        lay.setContentsMargins(26, 22, 26, 18)
+        lay.setSpacing(12)
+        lay.addWidget(QLabel("Программа пишет вашим почерком", objectName="welcomeTitle"))
+        sub = QLabel("Для этого ей нужны образцы ваших букв. Это делается один раз, "
+                     "примерно за полчаса, и дальше любой текст пишется вашей рукой.", objectName="stepText")
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
+        self.step_buttons: list[QPushButton] = []
+        for i, (title, text) in enumerate(WELCOME_STEPS):
+            card = QFrame(objectName="welcomeStep")
+            cl = QHBoxLayout(card)
+            cl.setContentsMargins(14, 12, 14, 12)
+            cl.setSpacing(14)
+            dot = QLabel(str(i + 1), objectName="planDot")
+            dot.setProperty("state", "on")
+            dot.setFixedSize(28, 28)
+            dot.setAlignment(Qt.AlignCenter)
+            cl.addWidget(dot, 0, Qt.AlignTop)
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            col.addWidget(QLabel(title, objectName="planStepTitle"))
+            lab = QLabel(text, objectName="hint")
+            lab.setWordWrap(True)
+            lab.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+            col.addWidget(lab)
+            cl.addLayout(col, 1)
+            if i == 0:
+                b = QPushButton("Сохранить бланк…")
+                b.clicked.connect(lambda: self.main.save_template("main"))
+            elif i == 3:
+                b = QPushButton("Импорт сканов…", objectName="primary")
+                b.clicked.connect(self._import)
+            else:
+                b = None
+            if b is not None:
+                cl.addWidget(b, 0, Qt.AlignVCenter)
+                self.step_buttons.append(b)
+            lay.addWidget(card)
+        demo = QFrame(objectName="welcomeDemo")
+        dl = QHBoxLayout(demo)
+        dl.setContentsMargins(14, 12, 14, 12)
+        dtext = QLabel("<b>Хотите сначала посмотреть?</b><br>Пример почерка (рукописный шрифт) и пример "
+                       "конспекта: можно сразу попробовать вид, настройки и печать.")
+        dtext.setWordWrap(True)
+        dtext.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        dl.addWidget(dtext, 1)
+        self.demo_btn = QPushButton("Попробовать на примере")
+        self.demo_btn.clicked.connect(self._demo)
+        dl.addWidget(self.demo_btn, 0, Qt.AlignVCenter)
+        lay.addWidget(demo)
+        row = QHBoxLayout()
+        self.show_box = QCheckBox("Показывать при запуске, пока нет своего почерка")
+        self.show_box.setChecked(self.main.qs.value("show_welcome", "true") in (True, "true"))
+        self.show_box.toggled.connect(lambda on: self.main.qs.setValue("show_welcome", on))
+        row.addWidget(self.show_box)
+        row.addStretch(1)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    def _import(self):
+        self.accept()
+        self.main.import_scans()
+
+    def _demo(self):
+        self.accept()
+        self.main.try_demo()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, profiles_dir: str | Path | None = None, settings: QSettings | None = None,
                  blank: bool = False):
@@ -1520,6 +1619,9 @@ class MainWindow(QMainWindow):
         act(m, "Шаг 3: печать", lambda: self.go_step(2), "Ctrl+3")
 
         m = self.menuBar().addMenu("Справка")
+        act(m, "С чего начать…", self.show_welcome)
+        act(m, "Попробовать на примере почерка", self.try_demo)
+        m.addSeparator()
         act(m, "Проверить обновления…", lambda: self.check_updates(silent=False))
         act(m, "О программе", self.show_about)
 
@@ -1708,6 +1810,30 @@ class MainWindow(QMainWindow):
             self.profiles_dir = Path(d)
             self.reload_profiles()
 
+    def own_profiles(self) -> list[tuple[str, Path]]:
+        """Профили, кроме примера почерка."""
+        return [p for p in sv.list_profiles(self.profiles_dir) if p[0] != sv.DEMO_NAME]
+
+    def should_welcome(self) -> bool:
+        return not self.own_profiles() and self.qs.value("show_welcome", "true") in (True, "true")
+
+    def show_welcome(self):
+        dlg = WelcomeDialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
+        return dlg
+
+    def try_demo(self):
+        """Создаёт (если ещё нет) пример почерка и открывает его с примером конспекта."""
+        def done(path):
+            self.reload_profiles(sv.DEMO_NAME)
+            if not self.text_edit.toPlainText().strip():
+                self.text_edit.setPlainText(sv.DEMO_TEXT)
+            self.go_step(1)
+        self.pages.show_hint("Готовлю пример почерка…")
+        self._run(sv.make_demo_profile, (self.profiles_dir,), done,
+                  "Готовлю пример почерка… это займёт около минуты")
+
     def _need_profile(self) -> bool:
         if self.profile is None:
             QMessageBox.information(self, APP_NAME, "Сначала импортируйте сканы бланка: Почерк → Импорт сканов бланка.")
@@ -1835,8 +1961,9 @@ class MainWindow(QMainWindow):
                 self.pages.show_hint("Профиль почерка не открылся:\n\n" + "\n".join(self.profile_errors)
                                      + f"\n\nПапка профилей: {self.profiles_dir}")
             else:
-                self.pages.show_hint("Нет профиля почерка.\n\nПочерк → Сохранить основной бланк, заполните его ручкой, "
-                                     "отсканируйте и нажмите «Импорт сканов…».")
+                self.pages.show_hint("Нет профиля почерка.\n\nРаспечатайте бланк («Бланк ▾»), заполните его ручкой, "
+                                     "отсканируйте и нажмите «Импорт сканов…».\n\nПошагово: Справка → С чего начать. "
+                                     "Посмотреть сразу: Справка → Попробовать на примере почерка.")
             self._set_missing(set())
             return
         if not text.strip():
@@ -2225,6 +2352,8 @@ def main(argv: list[str] | None = None) -> int:
     if w.blank:
         w.setWindowTitle(f"{APP_NAME} — новый конспект")
     w.show()
+    if not w.blank and w.should_welcome():
+        QTimer.singleShot(400, w.show_welcome)
     if not w.blank and updates.current_version():
         updates.cleanup_leftovers()
         QTimer.singleShot(1500, w.check_updates)

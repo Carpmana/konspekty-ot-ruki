@@ -479,3 +479,24 @@ def test_every_slider_has_help(window, monkeypatch):
         b.click()
     assert [t for t, _ in shown] == [b.property("help_for") for b in helps]
     assert all(len(text) > 60 for _, text in shown)
+
+
+def test_welcome_until_own_profile(app, tmp_path, monkeypatch):
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(tmp_path / "profiles", qs)
+    assert w.should_welcome()
+    dlg = w.show_welcome()
+    assert len(dlg.step_buttons) == 2
+    saved = []
+    monkeypatch.setattr(w, "save_template", lambda key: saved.append(key))
+    dlg.step_buttons[0].click()
+    assert saved == ["main"]
+    dlg.show_box.setChecked(False)
+    assert not w.should_welcome()
+    dlg.close()
+    qs.setValue("show_welcome", True)
+    sv.Profile.create(tmp_path / "profiles" / sv.DEMO_NAME, sv.DEMO_NAME)
+    assert w.should_welcome()  # пример почерка не считается своим
+    sv.Profile.create(tmp_path / "profiles" / "Мой", "Мой")
+    assert not w.should_welcome()
+    w.close()

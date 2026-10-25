@@ -294,3 +294,13 @@ def test_preview_then_finish_import(filled_photos, tmp_path):
     assert sum(not s.enabled for s in prof.samples) >= keep.count(False)
     assert res.turned_off + len(res.crossed) == sum(not s.enabled for s in prof.samples)
     assert "Отключено при просмотре" in res.summary()
+
+
+def test_demo_profile_renders_demo_text(tmp_path):
+    root = sv.make_demo_profile(tmp_path)
+    assert sv.list_profiles(tmp_path) == [(sv.DEMO_NAME, root)]
+    assert sv.make_demo_profile(tmp_path) == root  # второй раз не пересоздаётся
+    prof = Profile.load(root)
+    assert len(prof.samples) > 300
+    r = sv.render_text(sv.DEMO_TEXT, prof, sv.Options(), 60)
+    assert r.images and not r.missing

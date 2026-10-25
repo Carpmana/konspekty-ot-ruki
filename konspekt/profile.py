@@ -32,6 +32,9 @@ FORMAT_VERSION = 1
 # по низу чернил не уточняем.
 DESCENDERS = set("дзруфцщ" + "gjpqy" + ",;")
 BASELINE_FIX_MM = 2.5
+# Знаки, которые пишутся над строкой, а не стоят на ней: низ чернил у них
+# не базовая линия, иначе тире опускается на строку и выглядит как «_».
+ABOVE_LINE = set("-–—=+~*^\"'«»°→")
 
 DRAWN_SOURCE = "нарисовано в программе"
 
@@ -367,7 +370,7 @@ def entry_exit_points(alpha: np.ndarray, baseline: float) -> tuple[Point | None,
 def refine_baseline(alpha: np.ndarray, baseline: float, text: str) -> float:
     """Человек не всегда попадает точно на пунктир. Для символов без нижних
     выносных элементов базовая линия — низ основной части чернил."""
-    if any(c in DESCENDERS for c in text):
+    if any(c in DESCENDERS for c in text) or all(c in ABOVE_LINE for c in text):
         return baseline
     mask = alpha > 0.35
     rows = mask.sum(axis=1)

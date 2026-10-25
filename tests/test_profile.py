@@ -41,6 +41,7 @@ def test_baseline_refined_to_ink_bottom():
     assert refine_baseline(a, 80.0, "о") == 89.0
     assert refine_baseline(a, 80.0, "р") == 80.0  # у «р» есть хвост вниз
     assert refine_baseline(a, 10.0, "о") == 10.0  # слишком далеко — не трогаем
+    assert refine_baseline(a, 95.0, "—") == 95.0  # тире пишется над строкой, а не на ней
 
 
 def test_duplicate_import_detected(tmp_path, filled_photos):
