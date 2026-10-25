@@ -49,6 +49,14 @@ jobs:
         run: |
           $p = Start-Process dist/Konspekt/Konspekt.exe -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "Konspekt.exe exited with $($p.ExitCode)" }
+      - name: Self-update
+        # старая копия сама скачивает новую версию, закрывается и запускается
+        # уже обновлённой: с подставного сервера и с настоящего GitHub
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python packaging/check_update.py dist/Konspekt local
+          python packaging/check_update.py dist/Konspekt github
       - uses: actions/upload-artifact@v4
         with:
           name: Konspekt-windows

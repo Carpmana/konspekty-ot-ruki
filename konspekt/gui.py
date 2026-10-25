@@ -2218,6 +2218,8 @@ def main(argv: list[str] | None = None) -> int:
             pass
     if os.environ.get("KONSPEKT_SMOKE"):
         return _smoke(app)
+    if os.environ.get(UPDATE_SELFTEST):
+        return _update_selftest(app)
     args = sys.argv if argv is None else argv
     if updates.FINISH_ARG in args:
         return _finish_update(*args[args.index(updates.FINISH_ARG) + 1:][:2])
@@ -2242,6 +2244,40 @@ def _finish_update(target: str, pid: str) -> int:
         exe = Path(target) / "Konspekt.exe"
     updates.spawn([str(exe)])
     return 0
+
+
+UPDATE_SELFTEST = "KONSPEKT_UPDATE_SELFTEST"
+
+
+def _update_selftest(app: QApplication) -> int:
+    """Проверка самообновления в Actions: тот же путь, что после кнопки
+    «Обновить», только без окон-вопросов. В переменной — файл для записи хода."""
+    import tempfile
+
+    log = Path(os.environ.pop(UPDATE_SELFTEST))  # новая программа не должна обновляться снова
+
+    def note(*parts):
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(" ".join(str(p) for p in parts) + "\n")
+
+    QMessageBox.information = staticmethod(lambda *a, **k: note("окно:", a[2] if len(a) > 2 else a))
+    QMessageBox.warning = QMessageBox.critical = staticmethod(
+        lambda *a, **k: (note("ошибка:", a[2] if len(a) > 2 else a), app.exit(1)))
+    note("версия", updates.current_version(), "папка", updates.app_dir(),
+         "можно обновлять", updates.can_self_update())
+    d = tempfile.mkdtemp(prefix="konspekt-selftest-")
+    w = MainWindow(Path(d) / "profiles", QSettings(str(Path(d) / "s.ini"), QSettings.IniFormat))
+    w.show()
+    try:
+        rel = updates.fetch_latest(timeout=30)
+    except OSError as e:
+        note("ошибка: нет связи", e)
+        return 1
+    note("на GitHub", rel.version, rel.download_url, rel.size)
+    QTimer.singleShot(0, lambda: w._download_update(rel))
+    code = app.exec()
+    note("старая программа закрылась, код", code)
+    return code
 
 
 def _smoke(app: QApplication) -> int:
