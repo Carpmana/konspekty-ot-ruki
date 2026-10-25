@@ -176,6 +176,46 @@ def import_scans(profile_dir: str | Path, name: str, files: list[str | Path]) ->
     return finish_import(scan_import(profile_dir, name, files))
 
 
+DEMO_NAME = "Пример почерка"
+DEMO_FONT = Path(__file__).parent / "assets" / "Caveat.ttf"
+DEMO_TEXT = """# Фотосинтез
+>> Двадцать пятое октября
+Фотосинтез — образование органических веществ из углекислого газа и воды на свету.
+Где происходит: в _хлоропластах_ клеток листа.
+- световая фаза: вода расщепляется, выделяется кислород
+- темновая фаза: из CO_2 образуется глюкоза
+6CO_2 + 6H_2O -> C_6H_12O_6 + 6O_2
+[[Свет — источник энергии]]
+
+1. Какой газ выделяют растения на свету?
+2. Где в клетке идёт фотосинтез?"""
+
+
+def make_demo_profile(profiles_dir: str | Path) -> Path:
+    """Пример почерка, чтобы посмотреть программу до того, как заполнен свой бланк.
+
+    Бланк заполняется рукописным шрифтом Caveat и импортируется как обычный
+    скан, поэтому пример ведёт себя как настоящий профиль (только буквы
+    ровнее, чем у живой руки)."""
+    import tempfile
+
+    from .synthetic import fill_template
+
+    root = profile_dir_for(profiles_dir, DEMO_NAME)
+    if (root / PROFILE_FILE).exists():
+        return root
+    with tempfile.TemporaryDirectory() as d:
+        files = []
+        for i, page in enumerate(fill_template(str(DEMO_FONT), seed=5)):
+            files.append(Path(d) / f"пример_{i + 1}.png")
+            Image.fromarray(page).save(files[-1])
+        rep = import_files(files)
+    prof = Profile.create(root, DEMO_NAME)
+    prof.add_extracted(rep.samples)
+    prof.save()
+    return root
+
+
 def disable_crossed(prof: Profile, among: list[GlyphSample] | None = None, save: bool = True) -> list[GlyphSample]:
     """Отключает образцы, похожие на зачёркнутые (при импорте — только среди
     новых, чтобы не трогать то, что пользователь вернул сам). Они остаются в
