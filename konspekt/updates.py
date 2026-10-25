@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = "Carpmana/konspekty-ot-ruki"
-LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+# KONSPEKT_UPDATE_API — для проверки обновления в Actions на подставном «GitHub»
+LATEST_API = os.environ.get("KONSPEKT_UPDATE_API") or f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 ASSET_NAME = "Konspekt-windows.zip"
 FINISH_ARG = "--finish-update"
