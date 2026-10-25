@@ -35,6 +35,10 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+      - name: Version
+        shell: pwsh
+        # номер версии для программы: по нему она узнаёт, что вышла новая
+        run: Set-Content -Encoding utf8 konspekt/_build.py 'VERSION = "0.2.${{ github.run_number }}"'
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/konspekt.spec
       - name: Smoke test
