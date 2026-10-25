@@ -23,13 +23,13 @@ from PySide6.QtGui import (
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget,
-    QToolButton,
-    QVBoxLayout, QWidget,
+    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
+    QSlider, QSpinBox, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import icons, service as sv
+from . import updates
 from .charset import DIGITS, PUNCT, RU_LOWER, RU_UPPER
 from .layout import Settings as LayoutSettings, typeset
 from .profile import DRAWN_SOURCE, RAISE_LIMITS_MM, SCALE_LIMITS, GlyphSample, Profile
@@ -1367,6 +1367,10 @@ class MainWindow(QMainWindow):
         act(m, "Шаг 2: вид", lambda: self.go_step(1), "Ctrl+2")
         act(m, "Шаг 3: печать", lambda: self.go_step(2), "Ctrl+3")
 
+        m = self.menuBar().addMenu("Справка")
+        act(m, "Проверить обновления…", lambda: self.check_updates(silent=False))
+        act(m, "О программе", self.show_about)
+
     # ---------- настройки ----------
 
     def _restore(self):
@@ -1894,6 +1898,98 @@ class MainWindow(QMainWindow):
         painter.end()
         return True
 
+    # ---------- обновления ----------
+
+    def show_about(self):
+        ver = updates.current_version() or "из исходников"
+        QMessageBox.about(self, APP_NAME, f"<b>{APP_NAME}</b><br>Версия: {ver}<br><br>"
+                          f'<a href="{updates.RELEASES_PAGE}">Страница программы на GitHub</a>')
+
+    def check_updates(self, silent: bool = True):
+        """Спрашивает GitHub о последней версии. silent — проверка при запуске:
+        без интернета и когда обновлений нет, ничего не показываем."""
+        if not silent:
+            self.statusBar().showMessage("Проверяю обновления…")
+
+        def fail(msg):
+            if not silent:
+                self.statusBar().clearMessage()
+                QMessageBox.information(self, APP_NAME, "Не удалось проверить обновления: нет связи с GitHub.\n\n"
+                                        "Программа работает и без интернета, проверить можно позже.")
+
+        self._start(Task(updates.fetch_latest, on_done=lambda rel: self._update_info(rel, silent), on_fail=fail))
+
+    def _update_info(self, rel: updates.Release, silent: bool):
+        self.statusBar().clearMessage()
+        current = updates.current_version()
+        newer = updates.is_newer(rel.version, current)
+        if silent and (not newer or self.qs.value("skip_version", "") == rel.version):
+            return
+        if current and not newer:
+            QMessageBox.information(self, APP_NAME, f"У вас последняя версия ({current}).")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Обновление")
+        box.setIcon(QMessageBox.Information)
+        if current:
+            box.setText(f"<b>Вышла новая версия {rel.version}</b><br>У вас установлена {current}.<br><br>"
+                        "Обновить сейчас? Профили почерков и настройки сохранятся.")
+        else:
+            box.setText(f"Последняя версия на GitHub — {rel.version}.<br>"
+                        "Эта копия запущена из исходников и сама не обновляется.")
+        if rel.notes:
+            box.setDetailedText(rel.notes)
+        update = box.addButton("Обновить" if current else "Открыть страницу", QMessageBox.AcceptRole)
+        box.addButton("Позже", QMessageBox.RejectRole)
+        skip = box.addButton("Пропустить эту версию", QMessageBox.DestructiveRole) if current else None
+        box.exec()
+        if box.clickedButton() is skip:
+            self.qs.setValue("skip_version", rel.version)
+        elif box.clickedButton() is update:
+            if rel.download_url and updates.can_self_update():
+                self._download_update(rel)
+            else:
+                QDesktopServices.openUrl(QUrl(rel.page_url))
+
+    def _download_update(self, rel: updates.Release):
+        dlg = QProgressDialog(f"Скачиваю версию {rel.version}…", "Отмена", 0, 1000, self)
+        dlg.setWindowTitle("Обновление")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        state = {"done": 0, "total": rel.size}
+
+        def progress(done, total):  # из фонового потока: только записываем
+            state["done"], state["total"] = done, total
+
+        poll = QTimer(dlg)
+        poll.timeout.connect(lambda: dlg.setValue(int(1000 * state["done"] / max(state["total"], 1))))
+        poll.start(200)
+
+        def done(new_dir):
+            poll.stop()
+            dlg.close()
+            QMessageBox.information(self, "Обновление", "Новая версия скачана. Программа закроется "
+                                    "и сразу откроется уже обновлённой.")
+            self._save_settings()
+            try:
+                updates.start_finish(new_dir)
+            except OSError as e:
+                QMessageBox.critical(self, APP_NAME, f"Не удалось запустить обновление: {e}")
+                return
+            QApplication.quit()
+
+        def fail(msg):
+            poll.stop()
+            dlg.close()
+            if not dlg.wasCanceled():
+                QMessageBox.warning(self, APP_NAME, f"Не удалось скачать обновление: {msg}\n\n"
+                                    "Можно скачать вручную со страницы программы на GitHub.")
+
+        self._start(Task(updates.download, rel, progress, dlg.wasCanceled, on_done=done, on_fail=fail))
+        dlg.show()
+
     # ---------- фоновые задачи ----------
 
     def _start(self, task: Task):
@@ -1960,11 +2056,29 @@ def main(argv: list[str] | None = None) -> int:
     if os.environ.get("KONSPEKT_SMOKE"):
         return _smoke(app)
     args = sys.argv if argv is None else argv
+    if updates.FINISH_ARG in args:
+        return _finish_update(*args[args.index(updates.FINISH_ARG) + 1:][:2])
     w = MainWindow(os.environ.get("KONSPEKT_PROFILES"), blank="--new" in args)
     if w.blank:
         w.setWindowTitle(f"{APP_NAME} — новый конспект")
     w.show()
+    if not w.blank and updates.current_version():
+        updates.cleanup_leftovers()
+        QTimer.singleShot(1500, w.check_updates)
     return app.exec()
+
+
+def _finish_update(target: str, pid: str) -> int:
+    """Вторая половина обновления: эту программу запустили из временной папки,
+    она заменяет собой старую и запускает её."""
+    try:
+        exe = updates.finish_update(target, pid)
+    except OSError as e:
+        QMessageBox.critical(None, APP_NAME, f"Не удалось обновить программу: {e}\n\n"
+                             "Закройте все окна программы и попробуйте ещё раз. Старая версия осталась на месте.")
+        exe = Path(target) / "Konspekt.exe"
+    updates.spawn([str(exe)])
+    return 0
 
 
 def _smoke(app: QApplication) -> int:

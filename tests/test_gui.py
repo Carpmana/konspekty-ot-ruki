@@ -416,3 +416,34 @@ def test_print_wizard_single_sheet(app, window, profile, tmp_path):
     steps = window.print_steps(printer, r)
     assert [s.scene for s in steps] == ["insert", "done"]
     assert steps[0].action()
+
+
+def test_update_check(app, window, monkeypatch):
+    rel = gui.updates.Release("0.2.99", "Что нового", "https://example/rel", "", 0)
+    monkeypatch.setattr(gui.updates, "fetch_latest", lambda: rel)
+    monkeypatch.setattr(gui.updates, "current_version", lambda: "0.2.20")
+    shown = []
+    monkeypatch.setattr(gui.QMessageBox, "exec", lambda box: shown.append(box.text()) or 0)
+    window.check_updates()
+    wait_idle(app, window)
+    assert shown and "0.2.99" in shown[0] and "0.2.20" in shown[0]
+
+    window.qs.setValue("skip_version", "0.2.99")  # пропущенную версию при запуске не предлагаем
+    window.check_updates()
+    wait_idle(app, window)
+    assert len(shown) == 1
+
+
+def test_update_check_offline_is_silent(app, window, monkeypatch):
+    def offline():
+        raise OSError("нет сети")
+    monkeypatch.setattr(gui.updates, "fetch_latest", offline)
+    monkeypatch.setattr(gui.updates, "current_version", lambda: "0.2.20")
+    infos = []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: infos.append(a[2]))
+    window.check_updates(silent=True)
+    wait_idle(app, window)
+    assert infos == []
+    window.check_updates(silent=False)
+    wait_idle(app, window)
+    assert infos and "нет связи" in infos[0]
