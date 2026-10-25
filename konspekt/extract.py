@@ -23,7 +23,10 @@ GUIDE_DASH_H_MM = 0.7   # штрих направляющей тоньше лю�
 GUIDE_TOL_MM = 1.2
 SPECK_PX = 120          # мелкая соринка вдали от букв: точка, пылинка
 SPECK_DIST_MM = 3.0
+EDGE_PX = 3             # полоса у края клетки, где чернила значат «буква вылезла за клетку»
+EDGE_INK_PX = 6
 SEARCH_MM = 9.0  # насколько клетка может «уехать» из-за изгиба листа
+PRINT_MASK_MM = 0.8    # запас вокруг напечатанного при подгонке клетки
 MIN_MATCH = 0.25
 
 
@@ -37,6 +40,7 @@ class ExtractedSample:
     alpha: np.ndarray  # float32 0..1, плотность чернил
     baseline: float  # пикселей от верхнего края alpha
     source: str
+    clipped: bool = False  # буква упирается в край клетки — возможно, обрезана
 
 
 @dataclass
@@ -175,9 +179,14 @@ def cell_offsets(flat: np.ndarray, cells: list[Cell], template_rgb: np.ndarray) 
 
     Метки по углам дают общее выравнивание, но лист на фото бывает изогнут,
     и середина страницы съезжает на несколько миллиметров. Поэтому каждую
-    клетку ищем отдельно рядом с ожидаемым местом."""
+    клетку ищем отдельно рядом с ожидаемым местом.
+
+    Сравниваем только там, где на бланке что-то напечатано: чёрные чернила
+    серые, как типографская краска, и без маски буквы внутри клетки сбивают
+    поиск."""
     feat = printed_features(flat)
     tfeat = printed_features(template_rgb)
+    printed = cv2.dilate((tfeat > 20).astype(np.uint8), np.ones((2 * _px(PRINT_MASK_MM) + 1,) * 2, np.uint8))
     H, W = feat.shape
     m = _px(SEARCH_MM)
     raw: list[tuple[int, int] | None] = []
@@ -190,7 +199,9 @@ def cell_offsets(flat: np.ndarray, cells: list[Cell], template_rgb: np.ndarray) 
         if region.shape[0] < patch.shape[0] or region.shape[1] < patch.shape[1]:
             raw.append(None)
             continue
-        res = cv2.matchTemplate(region, patch, cv2.TM_CCOEFF_NORMED)
+        mask = printed[t:b, l:r].astype(np.float32)
+        res = np.nan_to_num(cv2.matchTemplate(region, patch, cv2.TM_CCOEFF_NORMED, mask=mask),
+                            nan=-1.0, posinf=-1.0, neginf=-1.0)
         _, score, _, loc = cv2.minMaxLoc(res)
         raw.append((loc[0] + sl - l, loc[1] + st - t) if score >= MIN_MATCH else None)
     return _smooth_offsets(cells, raw)
@@ -226,6 +237,15 @@ def crop_cell(page_img: np.ndarray, cell: Cell, offset: tuple[int, int] = (0, 0)
     return page_img[t:b, l:r], baseline
 
 
+def touches_edge(alpha: np.ndarray) -> bool:
+    """Чернила лежат вдоль края вырезанной клетки: буква, скорее всего,
+    вылезла за уголки и часть её не попала в образец."""
+    e = EDGE_PX
+    strong = alpha > 0.5
+    return any(int(band.sum()) >= EDGE_INK_PX
+               for band in (strong[:e], strong[-e:], strong[:, :e], strong[:, -e:]))
+
+
 def tight_crop(alpha: np.ndarray, baseline: float, pad: int = 3) -> tuple[np.ndarray, float]:
     ys, xs = np.nonzero(alpha > 0.05)
     y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad + 1, alpha.shape[0])
@@ -258,6 +278,7 @@ def import_files(paths: list[str | Path]) -> ImportReport:
                 if alpha is None:
                     report.empty_cells += 1
                     continue
+                clipped = touches_edge(alpha)
                 alpha, baseline = tight_crop(alpha, baseline)
-                report.samples.append(ExtractedSample(cell, alpha, baseline, name))
+                report.samples.append(ExtractedSample(cell, alpha, baseline, name, clipped))
     return report

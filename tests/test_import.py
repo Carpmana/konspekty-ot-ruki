@@ -93,3 +93,50 @@ def test_guide_dashes_and_far_specks_are_dropped():
     out = keep[labels]
     assert out[100, 90] and out[43, 103]
     assert not out[150, 15] and not out[12, 282]
+
+
+def test_black_ink_on_bent_sheet():
+    """Чёрные чернила серые, как печать бланка: подгонка клеток не должна
+    принимать буквы за уголки и подписи."""
+    import cv2
+
+    import konspekt.synthetic as syn
+    from konspekt.extract import _px, cell_offsets, find_page, warp_to_template
+    from konspekt.template import all_pages, render_page
+
+    from conftest import FONT
+
+    old = syn.INK
+    syn.INK = (25, 25, 28)
+    try:
+        page = syn.fill_template(FONT, seed=2)[0]
+    finally:
+        syn.INK = old
+    h, w = page.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    amp = _px(4.0)
+    bend = amp * np.sin(np.pi * xx / w) * np.sin(np.pi * yy / h)
+    img = cv2.remap(page, xx - bend, yy - 0.6 * bend, cv2.INTER_LINEAR, borderValue=(255, 255, 255))
+    img = syn.photograph(img, seed=3, strength=0.6)
+    n, H = find_page(img)
+    ts, cells, n_pages = all_pages()[n]
+    offsets = cell_offsets(warp_to_template(img, H), cells, np.array(render_page(cells, n, n_pages, ts)))
+    for c, (dx, dy) in zip(cells, offsets):
+        cx, cy = _px(c.x + c.w / 2), _px(c.y + c.h / 2)
+        k = amp * np.sin(np.pi * cx / w) * np.sin(np.pi * cy / h)
+        assert np.hypot(dx - k, dy - 0.6 * k) < _px(0.8), c.request.text
+
+
+def test_clipped_letter_detected():
+    from konspekt.extract import touches_edge
+
+    a = np.zeros((120, 100), np.float32)
+    a[40:80, 45:50] = 1.0
+    assert not touches_edge(a)
+    a[80:, 45:50] = 1.0  # хвост «д» ушёл за нижний край клетки
+    assert touches_edge(a)
+
+
+def test_samples_not_clipped_in_clean_fill(import_report):
+    # крупные заглавные шрифта иногда и правда задевают край клетки
+    assert sum(s.clipped for s in import_report.samples) <= len(import_report.samples) // 25

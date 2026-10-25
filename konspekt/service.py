@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from . import layout as lay
-from .extract import import_files
+from .extract import ExtractedSample, ImportReport, import_files
 from .profile import PROFILE_FILE, GlyphSample, Profile, safe_folder_name
 from .render import PAPER_COLOR, render_page, save_pdf
 from .units import mm_to_px
@@ -100,11 +100,15 @@ class ImportResult:
     total_samples: int = 0
     skipped: list[str] = field(default_factory=list)  # уже импортированы раньше
     crossed: list[str] = field(default_factory=list)  # отключённые зачёркнутые образцы
+    turned_off: int = 0  # отключены при просмотре импорта
 
     def summary(self) -> str:
         pages = ", ".join(str(p + 1) for p in sorted(set(self.pages_found))) or "нет"
         lines = [f"Профиль «{self.profile_name}»", f"Найдены страницы бланка: {pages}",
                  f"Добавлено образцов: {self.added} (всего в профиле: {self.total_samples})"]
+        if self.turned_off:
+            lines.append(f"Отключено при просмотре: {self.turned_off}. Вернуть их можно в меню "
+                         "Почерк → Редактор букв.")
         if self.crossed:
             lines.append(f"Отключены образцы, похожие на зачёркнутые: {' '.join(self.crossed)}. "
                          "Вернуть их можно в меню Почерк → Редактор букв.")
@@ -117,24 +121,59 @@ class ImportResult:
         return "\n".join(lines)
 
 
-def import_scans(profile_dir: str | Path, name: str, files: list[str | Path]) -> ImportResult:
-    """Добавляет образцы из сканов бланка в профиль; создаёт профиль, если его нет."""
+@dataclass
+class ImportPreview:
+    """Вырезанные из сканов буквы до того, как они попадут в профиль."""
+    profile_dir: Path
+    profile_name: str
+    new_files: list[Path]
+    skipped: list[str]
+    report: ImportReport
+
+    @property
+    def samples(self) -> list[ExtractedSample]:
+        return self.report.samples
+
+
+def scan_import(profile_dir: str | Path, name: str, files: list[str | Path]) -> ImportPreview:
+    """Вырезает буквы из сканов, профиль пока не меняет."""
     root = Path(profile_dir)
-    prof = Profile.load(root) if (root / PROFILE_FILE).exists() else Profile.create(root, name)
+    prof = Profile.load(root) if (root / PROFILE_FILE).exists() else None
     new, skipped = [], []
     for f in map(Path, files):
-        (skipped if f.exists() and prof.is_imported(f) else new).append(f)
-    if not new:
-        return ImportResult(root, prof.name, total_samples=len(prof.samples), skipped=[str(f) for f in skipped])
-    rep = import_files(new)
+        (skipped if prof is not None and f.exists() and prof.is_imported(f) else new).append(f)
+    rep = import_files(new) if new else ImportReport()
+    return ImportPreview(root, prof.name if prof else name, new, [str(f) for f in skipped], rep)
+
+
+def finish_import(preview: ImportPreview, keep: list[bool] | None = None) -> ImportResult:
+    """Добавляет вырезанные буквы в профиль (создаёт его, если нет).
+
+    keep — для каждого образца: брать ли его. Не взятые тоже сохраняются,
+    но отключёнными: их можно вернуть в «Редакторе букв»."""
+    root = preview.profile_dir
+    prof = Profile.load(root) if (root / PROFILE_FILE).exists() else Profile.create(root, preview.profile_name)
+    rep = preview.report
+    if not preview.new_files:
+        return ImportResult(root, prof.name, total_samples=len(prof.samples), skipped=preview.skipped)
     added = prof.add_extracted(rep.samples)
-    crossed = disable_crossed(prof, among=added, save=False)
-    for f in new:
+    if keep is not None:
+        for s, k in zip(added, keep):
+            s.enabled = bool(k)
+        prof.measure()
+    crossed = disable_crossed(prof, among=[s for s in added if s.enabled], save=False)
+    for f in preview.new_files:
         prof.mark_imported(f)
     prof.save()
+    off = sum(1 for s in added if not s.enabled) - len(crossed)
     return ImportResult(root, prof.name, list(rep.pages_found), len(added), rep.empty_cells,
-                        list(rep.files_without_markers), len(prof.samples), [str(f) for f in skipped],
-                        [s.text for s in crossed])
+                        list(rep.files_without_markers), len(prof.samples), preview.skipped,
+                        [s.text for s in crossed], off)
+
+
+def import_scans(profile_dir: str | Path, name: str, files: list[str | Path]) -> ImportResult:
+    """Добавляет образцы из сканов бланка в профиль; создаёт профиль, если его нет."""
+    return finish_import(scan_import(profile_dir, name, files))
 
 
 def disable_crossed(prof: Profile, among: list[GlyphSample] | None = None, save: bool = True) -> list[GlyphSample]:
@@ -243,6 +282,7 @@ class Options:
     corrections: float = 0.0  # доля слов с зачёркнутой опиской перед ними
     live_edge: float = 1.0  # 0–2: насколько гуляет начало строк у левого края
     flip_back: bool = False  # двойной листок: внутренняя сторона печатается повёрнутой на 180°
+    smoothness: float = 0.5  # 0–1: насколько заглаживать штрих шариковой ручки
 
     @property
     def fmt(self) -> PageFormat:
@@ -272,7 +312,8 @@ class Options:
                             margin_line=mode != "none",
                             margin_left_mm=f.outer_mm if mode != "none" else f.inner_mm,
                             margin_right_mm=f.inner_mm,
-                            tiredness=self.tiredness, corrections=self.corrections, live_edge=self.live_edge)
+                            tiredness=self.tiredness, corrections=self.corrections, live_edge=self.live_edge,
+                            smoothness=self.smoothness)
 
 
 @dataclass

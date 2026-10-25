@@ -161,3 +161,29 @@ def test_letter_size_editor_changes_layout(profile, tmp_path):
     g0, g1 = base.pages[0].glyphs[0], big.pages[0].glyphs[0]
     assert g1.scale == pytest.approx(1.3 * g0.scale, rel=0.01)
     assert g1.y < g0.y - 0.8  # выше строки
+
+
+def test_smooth_stroke_fills_ballpoint_gaps():
+    from konspekt.render import smooth_stroke
+
+    a = np.zeros((40, 120), np.float32)
+    a[18:23, 10:110] = 0.9
+    a[18:23, 30:32] = 0.0  # шарик не провернулся
+    a[18:23, 60:110:3] = 0.35  # зерно
+    assert smooth_stroke(a, 0.0) is a
+    s = smooth_stroke(a, 1.0)
+    assert s[20, 31] > 0.6 and s[20, 63] > 0.6
+    # толщина не растёт заметно
+    assert (s > 0.5).sum() <= 1.3 * (a > 0.5).sum() + 100
+    assert s[5, 60] < 0.05
+
+
+def test_smoothness_changes_ink(profile):
+    from konspekt.layout import Settings
+
+    def draw(v):
+        s = Settings(dpi=100, smoothness=v, paper_texture=False)
+        return np.asarray(render_page(typeset("Ощущение и восприятие", profile, s).pages[0], profile, s), np.float32)
+
+    imgs = [draw(v) for v in (0.0, 1.0)]
+    assert np.abs(imgs[0] - imgs[1]).mean() > 0.01

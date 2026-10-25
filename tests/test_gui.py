@@ -447,3 +447,23 @@ def test_update_check_offline_is_silent(app, window, monkeypatch):
     window.check_updates(silent=False)
     wait_idle(app, window)
     assert infos and "нет связи" in infos[0]
+
+
+def test_import_preview_unchecks_clipped(app, import_report, tmp_path):
+    from dataclasses import replace
+
+    samples = [replace(s) for s in import_report.samples[:6]]
+    samples[2].clipped = True
+    rep = replace(import_report, samples=samples)
+    preview = sv.ImportPreview(tmp_path / "п", "П", [tmp_path / "скан.png"], [], rep)
+    dlg = gui.ImportPreviewDialog(None, preview)
+    assert dlg.keep == [True, True, False, True, True, True]
+    dlg.only_bad.setChecked(True)
+    assert sum(t.isVisibleTo(dlg) for t in dlg.tiles) == 1
+    dlg.close()
+
+
+def test_smooth_slider_in_options(window):
+    window.smooth_slider.setValue(8)
+    assert window.options().smoothness == 0.8
+    assert window.options().settings(100).smoothness == 0.8
