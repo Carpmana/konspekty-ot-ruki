@@ -467,3 +467,15 @@ def test_smooth_slider_in_options(window):
     window.smooth_slider.setValue(8)
     assert window.options().smoothness == 0.8
     assert window.options().settings(100).smoothness == 0.8
+
+
+def test_every_slider_has_help(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda parent, title, text: shown.append((title, text)))
+    helps = [b for b in window.findChildren(QtWidgets.QToolButton) if b.property("help_for")]
+    sliders = window.findChildren(QtWidgets.QSlider)
+    assert len(helps) == len(sliders) == 5
+    for b in helps:
+        b.click()
+    assert [t for t, _ in shown] == [b.property("help_for") for b in helps]
+    assert all(len(text) > 60 for _, text in shown)

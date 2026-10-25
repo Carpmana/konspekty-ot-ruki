@@ -88,6 +88,9 @@ QRadioButton, QCheckBox {{ spacing: 8px; }}
 QToolButton#sample {{ background: #ffffff; border: 2px solid #d5d9e3; border-radius: 8px; padding: 4px; }}
 QToolButton#sample:checked {{ border-color: {ACCENT}; }}
 QToolButton#sample:!checked {{ background: #fbe9e9; border: 2px dashed #c0392b; }}
+QToolButton#help {{ background: #ffffff; border: 1px solid #c9cfdc; border-radius: 9px; color: #6b7385;
+                    font-weight: 600; min-width: 16px; max-width: 16px; min-height: 16px; max-height: 16px; padding: 0; }}
+QToolButton#help:hover {{ border-color: {ACCENT}; color: {ACCENT}; }}
 QLabel#missing {{ background: #fff4c2; color: #5a4a00; padding: 8px 10px; border-radius: 8px; }}
 QStatusBar {{ background: #ffffff; border-top: 1px solid #e3e6ee; color: #6b7385; }}
 QSplitter::handle {{ background: transparent; }}
@@ -382,6 +385,58 @@ class ImportDialog(QDialog):
         self.accept()
 
 
+SLIDER_HELP = {
+    "Аккуратность": (
+        "Насколько ровно пишет «рука».\n\n"
+        "Левее — буквы стоят ровнее, строка почти не волнится, наклон меняется мало, как при старательном письме.\n"
+        "Правее — строка гуляет сильнее, буквы разного размера и наклона, как при быстром конспекте на паре.\n\n"
+        "Середина — как в ваших образцах."),
+    "Рука устаёт к концу": (
+        "Как у живого человека к концу длинного конспекта: почерк постепенно становится крупнее и "
+        "размашистее, буквы небрежнее, строки чуть уползают вверх.\n\n"
+        "0 — первая и последняя страница написаны одинаково. Заметно на конспектах от 3–4 страниц."),
+    "Исправления (зачёркнутые описки)": (
+        "Изредка перед словом программа пишет описку (лишнюю или переставленную букву, недописанное слово) "
+        "и зачёркивает её одной-двумя линиями, а дальше пишет правильно.\n\n"
+        "0 — без исправлений. «Часто» — несколько на страницу. Так текст меньше похож на распечатку."),
+    "Живой левый край": (
+        "Человек не начинает каждую строку в одной и той же клетке: начало строк немного гуляет и "
+        "медленно плывёт по странице, изредка строка начинается правее.\n\n"
+        "«Ровно» — все строки от одной линии. За красное поле текст не заходит при любом положении."),
+    "Гладкость линии": (
+        "Шариковая ручка пишет с пропусками (шарик не провернулся) и зернистой линией, и сканер это "
+        "сохраняет.\n\n"
+        "Правее — пропуски закрываются, штрих становится ровным и сплошным, как у гелевой ручки. "
+        "Толщина линии не меняется.\n"
+        "0 — буквы точно как в скане. Ваши образцы при этом не меняются, только то, как они печатаются."),
+    "Размер": (
+        "Во сколько раз крупнее или мельче писать эту букву в тексте. 100% — как в образцах.\n\n"
+        "Пригодится, если какая-то буква в бланке вышла заметно больше или меньше остальных. "
+        "Размер отдельного варианта меняется в процентах под ним."),
+}
+
+
+def help_button(title: str, parent: QWidget | None = None) -> QToolButton:
+    """Кнопка «?»: по щелчку объясняет, для чего настройка."""
+    b = QToolButton(parent, objectName="help")
+    b.setText("?")
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip("Что это?")
+    b.setProperty("help_for", title)
+    b.clicked.connect(lambda: QMessageBox.information(b.window(), title, SLIDER_HELP[title]))
+    return b
+
+
+def slider_title(title: str) -> QHBoxLayout:
+    """Подпись ползунка с кнопкой «?» справа от неё."""
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    row.addWidget(QLabel(title))
+    row.addWidget(help_button(title))
+    row.addStretch(1)
+    return row
+
+
 def sample_pixmap(prof: Profile, s: GlyphSample, height: int = 90) -> QPixmap:
     return alpha_pixmap(prof.image(s), height)
 
@@ -532,7 +587,7 @@ class SamplesDialog(QDialog):
         sg.setContentsMargins(12, 8, 12, 8)
         self.size_title = QLabel(objectName="cardTitle")
         sg.addWidget(self.size_title, 0, 0, 1, 3)
-        sg.addWidget(QLabel("Размер"), 1, 0)
+        sg.addLayout(slider_title("Размер"), 1, 0)
         self.scale_slider = QSlider(Qt.Horizontal)
         lo, hi = (round(100 * v) for v in SCALE_LIMITS)
         self.scale_slider.setRange(lo, hi)
@@ -1088,7 +1143,7 @@ class MainWindow(QMainWindow):
         self.neat_slider = QSlider(Qt.Horizontal)
         self.neat_slider.setRange(5, 15)  # десятые: 0.5 … 1.5
         self.neat_slider.setToolTip("Насколько небрежно пишется текст")
-        sl.addWidget(QLabel("Аккуратность"))
+        sl.addLayout(slider_title("Аккуратность"))
         sl.addWidget(self.neat_slider)
         ends = QHBoxLayout()
         ends.addWidget(QLabel("аккуратно", objectName="hint"))
@@ -1099,12 +1154,12 @@ class MainWindow(QMainWindow):
         self.tired_slider.setRange(0, 10)
         self.tired_slider.setToolTip("К концу конспекта почерк становится крупнее, размашистее и небрежнее, "
                                      "строки уползают вверх — как у уставшей руки")
-        sl.addWidget(QLabel("Рука устаёт к концу"))
+        sl.addLayout(slider_title("Рука устаёт к концу"))
         sl.addWidget(self.tired_slider)
         self.fix_slider = QSlider(Qt.Horizontal)
         self.fix_slider.setRange(0, 10)
         self.fix_slider.setToolTip("Изредка перед словом пишется описка и зачёркивается. 0 — без исправлений")
-        sl.addWidget(QLabel("Исправления (зачёркнутые описки)"))
+        sl.addLayout(slider_title("Исправления (зачёркнутые описки)"))
         sl.addWidget(self.fix_slider)
         fends = QHBoxLayout()
         fends.addWidget(QLabel("нет", objectName="hint"))
@@ -1115,7 +1170,7 @@ class MainWindow(QMainWindow):
         self.edge_slider.setRange(0, 10)
         self.edge_slider.setToolTip("Человек не начинает каждую строку в одной и той же клетке: начало строк "
                                     "немного гуляет и плывёт по странице. 0 — почти ровный край")
-        sl.addWidget(QLabel("Живой левый край"))
+        sl.addLayout(slider_title("Живой левый край"))
         sl.addWidget(self.edge_slider)
         eends = QHBoxLayout()
         eends.addWidget(QLabel("ровно", objectName="hint"))
@@ -1126,7 +1181,7 @@ class MainWindow(QMainWindow):
         self.smooth_slider.setRange(0, 10)
         self.smooth_slider.setToolTip("Шариковая ручка оставляет пропуски и зернистую линию. Чем правее, тем "
                                       "ровнее и сплошнее штрих. 0 — точно как в скане")
-        sl.addWidget(QLabel("Гладкость линии"))
+        sl.addLayout(slider_title("Гладкость линии"))
         sl.addWidget(self.smooth_slider)
         smends = QHBoxLayout()
         smends.addWidget(QLabel("как в скане", objectName="hint"))
