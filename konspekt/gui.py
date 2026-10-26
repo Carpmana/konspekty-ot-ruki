@@ -9,6 +9,7 @@
 import datetime
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -2254,7 +2255,19 @@ class MainWindow(QMainWindow):
             state["done"], state["total"] = done, total
 
         poll = QTimer(dlg)
-        poll.timeout.connect(lambda: dlg.setValue(int(1000 * state["done"] / max(state["total"], 1))))
+        started = time.monotonic()
+
+        def show():  # сколько скачано и сколько примерно осталось: при медленном интернете это долго
+            done, total = state["done"], state["total"]
+            dlg.setValue(int(1000 * done / max(total, 1)))
+            text = f"Скачиваю версию {rel.version}…\n{done / 2**20:.0f} из {total / 2**20:.0f} МБ"
+            speed = done / max(time.monotonic() - started, 1e-3)
+            if done > 2**20 and total > done:
+                left = (total - done) / speed
+                text += f", осталось около {_duration(left)}"
+            dlg.setLabelText(text)
+
+        poll.timeout.connect(show)
         poll.start(200)
 
         def done(new_dir):
@@ -2319,6 +2332,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, msg)
 
         self._start(Task(fn, *args, on_done=ok, on_fail=fail))
+
+
+def _duration(seconds: float) -> str:
+    m = round(seconds / 60)
+    if m < 1:
+        return "минуты"
+    if m < 60:
+        return f"{m} мин"
+    return f"{m // 60} ч {m % 60} мин"
 
 
 def apply_light_theme(app: QApplication):
