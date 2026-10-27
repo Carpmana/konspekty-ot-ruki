@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 
-from konspekt.extract import extract_ink, import_files
+from konspekt.extract import HD, extract_ink, import_files, upscale_legacy
 from konspekt.template import layout_cells, save_template_pdf
 
 
@@ -140,3 +140,37 @@ def test_clipped_letter_detected():
 def test_samples_not_clipped_in_clean_fill(import_report):
     # крупные заглавные шрифта иногда и правда задевают край клетки
     assert sum(s.clipped for s in import_report.samples) <= len(import_report.samples) // 25
+
+
+def _cell_with_speck(scale: int = 1) -> np.ndarray:
+    """Клетка со штрихом и пылинкой в 1,5 мм слева от него."""
+    import cv2
+
+    cell = np.full((200 * scale, 160 * scale, 3), 250, np.uint8)
+    cv2.line(cell, (60 * scale, 140 * scale), (90 * scale, 60 * scale), (40, 50, 140), 4 * scale)
+    cv2.line(cell, (90 * scale, 60 * scale), (120 * scale, 140 * scale), (40, 50, 140), 4 * scale)
+    cv2.circle(cell, (40 * scale, 120 * scale), 3 * scale, (40, 50, 140), -1)
+    return cell
+
+
+def test_lone_speck_dropped_but_dot_kept():
+    for scale in (1, HD):
+        speck = (slice(115 * scale, 126 * scale), slice(35 * scale, 46 * scale))
+        a = extract_ink(_cell_with_speck(scale), text="л", scale=scale)
+        assert a[speck].max() == 0  # в «л» точки нет — это соринка
+        a = extract_ink(_cell_with_speck(scale), text="ё", scale=scale)
+        assert a[speck].max() > 0.5  # а в «ё» точка своя
+
+
+def test_samples_have_hd_copy(import_report):
+    for s in import_report.samples[:40]:
+        assert s.alpha_hd.shape == (s.alpha.shape[0] * HD, s.alpha.shape[1] * HD)
+        assert abs(float(s.alpha_hd.mean()) - float(s.alpha.mean())) < 0.03
+
+
+def test_legacy_sample_upscaled_without_specks():
+    a = extract_ink(_cell_with_speck(), text="ё")  # старый образец с точкой
+    hd = upscale_legacy(a, "л")
+    assert hd.shape == (a.shape[0] * HD, a.shape[1] * HD)
+    assert hd[115 * HD:126 * HD, 35 * HD:46 * HD].max() == 0
+    assert hd.max() > 0.9

@@ -3,6 +3,8 @@
 Структура папки:
     profile.json   — имя, параметры почерка, список образцов
     samples/*.png  — образцы: плотность чернил в оттенках серого, 300 dpi
+    samples/*@2x.png — те же образцы в 600 dpi для печати (у образцов из
+                     прежних версий их нет, программа обходится без них)
 
 Каждый профиль живёт в своей папке, поэтому почерки не смешиваются, а
 профиль можно скопировать или передать целиком.
@@ -21,7 +23,7 @@ import numpy as np
 from PIL import Image
 
 from .charset import BODY, DIGITS, LAT_LOWER, PUNCT, RU_BY_FREQUENCY, RU_LOWER, RU_UPPER
-from .extract import ExtractedSample
+from .extract import HD, ExtractedSample, upscale_legacy
 from .units import px_to_mm
 
 SAMPLE_DPI = 300
@@ -39,8 +41,8 @@ ABOVE_LINE = set("-–—=+~*^\"'«»°→")
 DRAWN_SOURCE = "нарисовано в программе"
 
 # Зачёркнутый образец: чернил в разы больше, чем у других вариантов того же
-# символа. У живых вариантов разброс до ~1.7 раза.
-CROSSED_INK_RATIO = 2.2
+# символа. У живых вариантов разброс до ~1.75 раза (сканы 11–19).
+CROSSED_INK_RATIO = 2.1
 
 # Пределы ручной подстройки в «Редакторе букв».
 SCALE_LIMITS = (0.5, 1.8)
@@ -165,6 +167,9 @@ class Profile:
             fname = f"samples/{sid}.png"
             img = (np.clip(e.alpha, 0, 1) * 255).astype(np.uint8)
             Image.fromarray(img, "L").save(self.root / fname)
+            if e.alpha_hd is not None:
+                hd = (np.clip(e.alpha_hd, 0, 1) * 255).astype(np.uint8)
+                Image.fromarray(hd, "L").save(self.root / hd_name(fname))
             text = e.cell.request.text
             baseline = refine_baseline(e.alpha, e.baseline, text)
             entry, exit_ = entry_exit_points(e.alpha, baseline)
@@ -196,10 +201,11 @@ class Profile:
         """Удаляет образец вместе с картинкой: неудачный вариант или «переделать»."""
         s = next(x for x in self.samples if x.id == sample_id)
         self.samples.remove(s)
-        for key in (sample_id, f"{sample_id}:norm"):
+        for key in [k for k in self._cache if k.split(":")[0] == sample_id]:
             self._cache.pop(key, None)
         self.variant_scale.pop(sample_id, None)
         (self.root / s.file).unlink(missing_ok=True)
+        (self.root / hd_name(s.file)).unlink(missing_ok=True)
         if measure:
             self.measure()
 
@@ -251,6 +257,21 @@ class Profile:
             with Image.open(self.root / s.file) as im:
                 self._cache[s.id] = np.asarray(im.convert("L"), np.float32) / 255.0
         return self._cache[s.id]
+
+    def print_image(self, s: GlyphSample) -> tuple[np.ndarray, int]:
+        """Образец для печати и во сколько раз он плотнее 300 dpi.
+        Размеры и точки в GlyphSample по-прежнему в пикселях 300 dpi."""
+        key = f"{s.id}:hd"
+        if key not in self._cache:
+            hd = self.root / hd_name(s.file) if s.file else None
+            if hd is not None and hd.exists():
+                with Image.open(hd) as im:
+                    self._cache[key] = (np.asarray(im.convert("L"), np.float32) / 255.0, HD)
+            elif s.file:
+                self._cache[key] = (upscale_legacy(self.image(s), s.text), HD)
+            else:
+                self._cache[key] = (self.image(s), 1)
+        return self._cache[key]
 
     def variants(self, text: str, style: str = BODY) -> list[GlyphSample]:
         return [s for s in self.samples if s.enabled and s.text == text and s.style == style]
@@ -328,6 +349,12 @@ class Profile:
         out["сочетания и слова"] = sorted(self.clusters())
         out["стоит добавить"] = "".join(c for c in RU_BY_FREQUENCY[:12] if count(c) < 6)
         return out
+
+
+def hd_name(file: str) -> str:
+    """samples/abc.png → samples/abc@2x.png"""
+    p = Path(file)
+    return str(p.with_name(f"{p.stem}@{HD}x{p.suffix}").as_posix())
 
 
 def file_sha256(path: str | Path) -> str:

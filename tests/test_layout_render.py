@@ -110,7 +110,7 @@ def test_tiredness_grows_handwriting(profile):
 
     def last_scale(t):
         lay = typeset(text, profile, Settings(seed=3, tiredness=t))
-        gs = lay.pages[-1].glyphs[-60:]
+        gs = lay.pages[-1].glyphs  # вся страница: 60 букв — слишком мало против случайного выбора вариантов
         return np.mean([g.scale for g in gs]), len(lay.pages)
 
     calm, tired = last_scale(0.0), last_scale(1.0)
@@ -187,3 +187,23 @@ def test_smoothness_changes_ink(profile):
 
     imgs = [draw(v) for v in (0.0, 1.0)]
     assert np.abs(imgs[0] - imgs[1]).mean() > 0.01
+
+
+def test_hd_print_matches_preview(profile):
+    # Печать берёт буквы в 600 dpi, предпросмотр — в 300: буквы должны
+    # стоять на тех же местах и быть той же толщины.
+    import cv2
+
+    from konspekt.render import HD_MIN_DPI
+
+    s = Settings(seed=2, dpi=HD_MIN_DPI - 50, paper="blank", paper_texture=False)
+    page = typeset(TEXT[:200], profile, s).pages[0]
+    lo = np.asarray(render_page(page, profile, s).convert("L"), np.float32)
+    s2 = Settings(seed=2, dpi=2 * (HD_MIN_DPI - 50), paper="blank", paper_texture=False)
+    hi = np.asarray(render_page(page, profile, s2).convert("L"), np.float32)
+    hi = cv2.resize(hi, lo.shape[::-1], interpolation=cv2.INTER_AREA)
+    ink_lo, ink_hi = 255 - lo, 255 - hi
+    assert abs(ink_hi.sum() / ink_lo.sum() - 1) < 0.15
+    ys, xs = np.nonzero(ink_lo > 60)
+    yh, xh = np.nonzero(ink_hi > 60)
+    assert abs(xs.mean() - xh.mean()) < 2 and abs(ys.mean() - yh.mean()) < 2

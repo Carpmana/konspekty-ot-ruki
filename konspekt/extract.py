@@ -28,6 +28,13 @@ EDGE_INK_PX = 6
 SEARCH_MM = 9.0  # насколько клетка может «уехать» из-за изгиба листа
 PRINT_MASK_MM = 0.8    # запас вокруг напечатанного при подгонке клетки
 MIN_MATCH = 0.25
+# Образцы вырезаются с запасом по плотности: HD раз плотнее бланка (600 dpi).
+# Печать тогда берёт буквы с чёткими краями, а не растянутые 300 dpi.
+HD = 2
+LONE_SPECK_MM = 0.8    # компактная точка не крупнее этого — соринка, если рядом нет штриха
+LONE_GAP_MM = 0.5      # обрывки штриха (ручка не прописала) лежат ближе
+# Символы, у которых есть отдельные точки и чёрточки: у них точку не трогаем.
+DETACHED_MARKS = set("ёйЁЙ!?:;.,іїij%…\"'«»÷")
 
 
 class ImportErrorRu(Exception):
@@ -37,10 +44,11 @@ class ImportErrorRu(Exception):
 @dataclass
 class ExtractedSample:
     cell: Cell
-    alpha: np.ndarray  # float32 0..1, плотность чернил
+    alpha: np.ndarray  # float32 0..1, плотность чернил, 300 dpi
     baseline: float  # пикселей от верхнего края alpha
     source: str
     clipped: bool = False  # буква упирается в край клетки — возможно, обрезана
+    alpha_hd: np.ndarray | None = None  # тот же образец в HD раз плотнее
 
 
 @dataclass
@@ -52,7 +60,11 @@ class ImportReport:
 
 
 def load_images(path: str | Path) -> list[np.ndarray]:
-    """Возвращает страницы файла как RGB-массивы. PDF рендерится в 300 dpi."""
+    """Возвращает страницы файла как RGB-массивы.
+
+    Скан в PDF обычно — одна картинка на страницу. Её берём в родном
+    разрешении: если растянуть до 300 dpi заранее, буквы потом дважды
+    пересчитываются и мылятся."""
     path = Path(path)
     if not path.exists():
         raise ImportErrorRu(f"Файл не найден: {path}")
@@ -62,7 +74,7 @@ def load_images(path: str | Path) -> list[np.ndarray]:
         out = []
         with pymupdf.open(str(path)) as doc:
             for page in doc:
-                pix = page.get_pixmap(dpi=DPI, colorspace=pymupdf.csRGB, alpha=False)
+                pix = page.get_pixmap(dpi=_pdf_dpi(page), colorspace=pymupdf.csRGB, alpha=False)
                 out.append(np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3).copy())
         return out
     try:
@@ -70,6 +82,20 @@ def load_images(path: str | Path) -> list[np.ndarray]:
             return [np.array(ImageOps.exif_transpose(im).convert("RGB"))]
     except OSError as e:
         raise ImportErrorRu(f"Не удалось открыть изображение {path.name}: {e}") from e
+
+
+def _pdf_dpi(page) -> int:
+    """Разрешение, при котором картинка скана ложится на страницу пиксель в
+    пиксель. Без картинок (бланк из программы) — 300 dpi. Не больше 600:
+    больше бумага сканера всё равно не даёт."""
+    best = 0.0
+    for info in page.get_image_info():
+        w_in = (info["bbox"][2] - info["bbox"][0]) / 72.0
+        if w_in > 0 and info.get("width"):
+            best = max(best, info["width"] / w_in)
+    if best <= 0:
+        return DPI
+    return int(np.clip(round(best), 72, 2 * DPI))
 
 
 def find_page(img: np.ndarray) -> tuple[int, np.ndarray] | None:
@@ -110,55 +136,113 @@ def warp_to_template(img: np.ndarray, H: np.ndarray) -> np.ndarray:
     return cv2.warpPerspective(img, H, size, flags=cv2.INTER_LINEAR, borderValue=(255, 255, 255))
 
 
-def ink_density(rgb: np.ndarray) -> np.ndarray:
-    """Плотность чернил 0..1 с поправкой на неравномерное освещение."""
+def ink_density(rgb: np.ndarray, scale: int = 1) -> np.ndarray:
+    """Плотность чернил 0..1 с поправкой на неравномерное освещение.
+    scale — во сколько раз картинка плотнее 300 dpi."""
     r = rgb[..., 0].astype(np.float32)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+    k = 31 * scale | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     bg = cv2.morphologyEx(r, cv2.MORPH_CLOSE, kernel)
-    bg = cv2.GaussianBlur(bg, (0, 0), 8)
+    bg = cv2.GaussianBlur(bg, (0, 0), 8 * scale)
     return np.clip(1.0 - r / np.maximum(bg, 1.0), 0.0, 1.0)
 
 
-def extract_ink(rgb: np.ndarray, guides: tuple[float, ...] = ()) -> np.ndarray | None:
+def extract_ink(rgb: np.ndarray, guides: tuple[float, ...] = (), text: str = "",
+                scale: int = 1) -> np.ndarray | None:
     """Выделяет чернила в клетке. None, если клетка пустая.
 
     guides: высоты направляющих линий клетки в пикселях кропа. На блёклых или
-    желтоватых сканах оранжевый пунктир темнеет и попадает в маску."""
-    dark = ink_density(rgb)
+    желтоватых сканах оранжевый пунктир темнеет и попадает в маску.
+    text: что написано в клетке — по нему понятно, может ли там быть точка.
+    scale: во сколько раз кроп плотнее 300 dpi."""
+    dark = ink_density(rgb, scale)
     otsu, _ = cv2.threshold((dark * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     t = float(np.clip(otsu / 255.0 * 0.8, 0.12, 0.5))
     mask = (dark > t).astype(np.uint8)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    keep = _keep_components(stats, guides)
+    keep = _keep_components(stats, guides, scale)
+    keep = _drop_lone_specks(labels, stats, keep, text, scale)
     mask = keep[labels].astype(np.uint8)
-    if mask.sum() < MIN_INK_PX:
+    if mask.sum() < MIN_INK_PX * scale * scale:
         return None
-    soft = cv2.dilate(mask, np.ones((3, 3), np.uint8)).astype(np.float32)
+    return _clean_alpha(dark, mask, t, scale)
+
+
+def _clean_alpha(dark: np.ndarray, mask: np.ndarray, t: float, scale: int) -> np.ndarray:
+    """Плотность чернил без грязи вокруг букв.
+
+    Всё, что не рядом с оставленными штрихами, обнуляется (пятна, тень от
+    сгиба, обрывки разметки). Край штриха делается резким: серый ореол от
+    размытия скана и сжатия JPEG при печати выглядел как грязная обводка.
+    Внутри линии остаётся живая плотность ручки."""
+    k = 2 * scale + 1
+    near = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(np.float32)
+    near = cv2.GaussianBlur(near, (0, 0), 0.5 * scale)
     # Растягиваем контраст: бледный (пересвеченный) скан даёт такую же
     # насыщенную линию, как и тёмный. Цвет ручки задаётся при отрисовке.
-    lo = t * 0.4
+    lo = t * 0.55
     hi = max(float(np.percentile(dark[mask > 0], 85)), lo + 0.1)
-    alpha = np.clip((dark - lo) / (hi - lo), 0.0, 1.0) * soft
-    return alpha.astype(np.float32)
+    a = np.clip((dark - lo) / (hi - lo), 0.0, 1.0)
+    # Где шарик ручки проскочил, линия рвётся на чёрточки: стягиваем разрывы
+    # длиной в толщину линии, чтобы при печати штрих не выглядел пунктиром.
+    closed = cv2.morphologyEx(a, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k + 2, k + 2)))
+    a = np.maximum(a, 0.9 * closed) ** 0.8
+    a = a * a * (3 - 2 * a)  # крутой край вместо пологого ореола
+    a = (a * near).astype(np.float32)
+    a[a < 0.04] = 0.0
+    # Бледные пятнышки отдельно от линии: тень пылинки, след сжатия JPEG.
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((a > 0).astype(np.uint8), connectivity=8)
+    if n > 2:
+        peak = np.zeros(n, np.float32)
+        np.maximum.at(peak, labels.ravel(), a.ravel())
+        faint = peak < 0.5
+        faint[0] = False
+        a[faint[labels]] = 0.0
+    return a
 
 
-def _keep_components(stats: np.ndarray, guides: tuple[float, ...]) -> np.ndarray:
+def _keep_components(stats: np.ndarray, guides: tuple[float, ...], scale: int = 1) -> np.ndarray:
     """Отбрасывает шум: крошки, штрихи пунктира на направляющих и соринки,
     лежащие далеко от написанного."""
     x, y, w, h, area = (stats[:, i] for i in range(5))
-    keep = area >= MIN_COMPONENT_PX
+    s2 = scale * scale
+    keep = area >= MIN_COMPONENT_PX * s2
     keep[0] = False
-    dash_h, tol = _px(GUIDE_DASH_H_MM), _px(GUIDE_TOL_MM)
+    dash_h, tol = _px(GUIDE_DASH_H_MM, scale), _px(GUIDE_TOL_MM, scale)
     cy = y + h / 2.0
     for g in guides:
-        keep &= ~((h <= dash_h) & ((w >= 1.5 * h) | (area < SPECK_PX)) & (np.abs(cy - g) <= tol))
+        keep &= ~((h <= dash_h) & ((w >= 1.5 * h) | (area < SPECK_PX * s2)) & (np.abs(cy - g) <= tol))
     if keep.sum() > 1:
         main = int(np.argmax(np.where(keep, area, 0)))
-        far = _px(SPECK_DIST_MM)
+        far = _px(SPECK_DIST_MM, scale)
         gap_x = np.maximum(0, np.maximum(x[main] - (x + w), x - (x[main] + w[main])))
         gap_y = np.maximum(0, np.maximum(y[main] - (y + h), y - (y[main] + h[main])))
-        keep &= ~((area < SPECK_PX) & (np.maximum(gap_x, gap_y) > far))
+        keep &= ~((area < SPECK_PX * s2) & (np.maximum(gap_x, gap_y) > far))
     return keep
+
+
+def _drop_lone_specks(labels: np.ndarray, stats: np.ndarray, keep: np.ndarray, text: str,
+                      scale: int = 1) -> np.ndarray:
+    """Убирает точки-соринки рядом с буквой: пыль на стекле сканера, след
+    ручки, крошка ластика. В «не» или «ш» отдельной точки быть не может, а
+    при печати она выглядела как лишний штрих.
+
+    Не трогаем символы с точками (ё, й, ?, !, «:») и обрывки штриха там, где
+    ручка не прописала: они вытянуты и лежат вплотную к линии."""
+    if any(c in DETACHED_MARKS for c in text) or keep.sum() < 2:
+        return keep
+    x, y, w, h, area = (stats[:, i] for i in range(5))
+    small = keep & (np.maximum(w, h) <= _px(LONE_SPECK_MM, scale)) & (area < SPECK_PX * scale * scale)
+    big = keep & ~small
+    if not small.any() or not big.any():
+        return keep
+    dist = cv2.distanceTransform((~big[labels]).astype(np.uint8), cv2.DIST_L2, 3)
+    out = keep.copy()
+    gap = _px(LONE_GAP_MM, scale)
+    for i in np.nonzero(small)[0]:
+        if dist[labels == i].min() > gap:
+            out[i] = False
+    return out
 
 
 def printed_features(rgb: np.ndarray) -> np.ndarray:
@@ -170,8 +254,8 @@ def printed_features(rgb: np.ndarray) -> np.ndarray:
     return ((255.0 - mx) * np.clip(1.0 - 2.5 * sat, 0.0, 1.0)).astype(np.float32)
 
 
-def _px(mm: float) -> int:
-    return int(round(mm_to_px(mm, DPI)))
+def _px(mm: float, scale: int = 1) -> int:
+    return int(round(mm_to_px(mm, DPI * scale)))
 
 
 def cell_offsets(flat: np.ndarray, cells: list[Cell], template_rgb: np.ndarray) -> list[tuple[int, int]]:
@@ -228,13 +312,45 @@ def _smooth_offsets(cells: list[Cell], raw: list[tuple[int, int] | None], k: int
     return out
 
 
-def crop_cell(page_img: np.ndarray, cell: Cell, offset: tuple[int, int] = (0, 0)) -> tuple[np.ndarray, float]:
+def cell_rect(cell: Cell, offset: tuple[int, int] = (0, 0)) -> tuple[int, int, int, int]:
     dx, dy = offset
     l, t = _px(cell.x + CELL_INSET_MM) + dx, _px(cell.y + CELL_INSET_MM) + dy
     r, b = _px(cell.x + cell.w - CELL_INSET_MM) + dx, _px(cell.y + cell.h - CELL_INSET_MM) + dy
-    baseline = mm_to_px(cell.y + BASELINE_FROM_TOP_MM, DPI) + dy - t
-    l, t = max(l, 0), max(t, 0)
-    return page_img[t:b, l:r], baseline
+    return l, t, r, b
+
+
+def crop_cell_hd(img: np.ndarray, H: np.ndarray, cell: Cell, offset: tuple[int, int] = (0, 0)) -> np.ndarray:
+    """Клетка прямо из исходного скана в HD раз плотнее бланка. Один пересчёт
+    пикселей вместо двух, поэтому края букв не мылятся."""
+    l, t, r, b = cell_rect(cell, offset)
+    M = np.array([[HD, 0, -HD * l], [0, HD, -HD * t], [0, 0, 1]], np.float64) @ H
+    return cv2.warpPerspective(img, M, (HD * (r - l), HD * (b - t)), flags=cv2.INTER_CUBIC,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+
+
+def downsample(alpha_hd: np.ndarray) -> np.ndarray:
+    h, w = alpha_hd.shape
+    return cv2.resize(alpha_hd, (w // HD, h // HD), interpolation=cv2.INTER_AREA)
+
+
+def upscale_legacy(alpha: np.ndarray, text: str = "") -> np.ndarray:
+    """Образец старого профиля (300 dpi) → HD для печати: та же очистка от
+    соринок и резкий край, что и у нового импорта. Сканы заново загружать
+    не нужно."""
+    mask = (alpha > 0.35).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    keep = stats[:, 4] > 0
+    keep[0] = False
+    keep = _drop_lone_specks(labels, stats, keep, text)
+    # Оставляем только окрестность настоящих штрихов: бледные пятна и
+    # соринки вокруг уходят.
+    a = alpha * cv2.dilate(keep[labels].astype(np.uint8), np.ones((5, 5), np.uint8))
+    h, w = a.shape
+    a = cv2.resize(a, (w * HD, h * HD), interpolation=cv2.INTER_CUBIC)
+    a = np.clip((a - 0.08) / 0.75, 0.0, 1.0)
+    a = a * a * (3 - 2 * a)
+    a[a < 0.04] = 0.0
+    return a.astype(np.float32)
 
 
 def touches_edge(alpha: np.ndarray) -> bool:
@@ -246,11 +362,11 @@ def touches_edge(alpha: np.ndarray) -> bool:
                for band in (strong[:e], strong[-e:], strong[:, :e], strong[:, -e:]))
 
 
-def tight_crop(alpha: np.ndarray, baseline: float, pad: int = 3) -> tuple[np.ndarray, float]:
+def tight_box(alpha: np.ndarray, pad: int = 3) -> tuple[int, int, int, int]:
     ys, xs = np.nonzero(alpha > 0.05)
     y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad + 1, alpha.shape[0])
     x0, x1 = max(xs.min() - pad, 0), min(xs.max() + pad + 1, alpha.shape[1])
-    return alpha[y0:y1, x0:x1].copy(), baseline - y0
+    return x0, y0, x1, y1
 
 
 def import_files(paths: list[str | Path]) -> ImportReport:
@@ -273,12 +389,17 @@ def import_files(paths: list[str | Path]) -> ImportReport:
             template_rgb = np.array(render_page(cells, page, n_pages, ts))
             offsets = cell_offsets(flat, cells, template_rgb)
             for cell, off in zip(cells, offsets):
-                crop, baseline = crop_cell(flat, cell, off)
-                alpha = extract_ink(crop, (baseline, baseline - mm_to_px(XHEIGHT_GUIDE_MM, DPI)))
-                if alpha is None:
+                baseline = mm_to_px(cell.y + BASELINE_FROM_TOP_MM, DPI) + off[1] - cell_rect(cell, off)[1]
+                crop = crop_cell_hd(img, H, cell, off)
+                guides = (baseline * HD, (baseline - mm_to_px(XHEIGHT_GUIDE_MM, DPI)) * HD)
+                alpha_hd = extract_ink(crop, guides, cell.request.text, HD)
+                if alpha_hd is None:
                     report.empty_cells += 1
                     continue
+                alpha = downsample(alpha_hd)
                 clipped = touches_edge(alpha)
-                alpha, baseline = tight_crop(alpha, baseline)
-                report.samples.append(ExtractedSample(cell, alpha, baseline, name, clipped))
+                x0, y0, x1, y1 = tight_box(alpha)
+                report.samples.append(ExtractedSample(
+                    cell, alpha[y0:y1, x0:x1].copy(), baseline - y0, name, clipped,
+                    alpha_hd[HD * y0:HD * y1, HD * x0:HD * x1].copy()))
     return report
