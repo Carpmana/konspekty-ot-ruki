@@ -46,8 +46,8 @@ MARGINS = [("left", "Поле слева"), ("outer", "Снаружи, как в
 NOTEBOOK_LINE_PITCH_MM = 8.0  # тетрадь в линейку
 DEFAULT_SEED = 3  # вариант оформления, который выбрали в прототипе
 PREVIEW_DPI = 110
-EXPORT_DPI = 200
-PRINT_DPI = 300
+EXPORT_DPI = 300
+PRINT_DPI = 400  # буквы хранятся в 600 dpi; 400 — чётче 300 и ещё не тяжело для памяти
 
 
 def default_profiles_dir() -> Path:

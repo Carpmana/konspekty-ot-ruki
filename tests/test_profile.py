@@ -88,3 +88,24 @@ def test_letter_adjust_saved_and_deleted_sample(profile, tmp_path):
     p3 = Profile.load(tmp_path / "p")
     assert victim.id not in {s.id for s in p3.samples} and victim.id not in p3.variant_scale
     assert not (tmp_path / "p" / victim.file).exists()
+
+
+def test_print_image_hd_and_legacy(profile, tmp_path):
+    import shutil
+
+    from konspekt.extract import HD
+    from konspekt.profile import hd_name
+
+    s = profile.samples[0]
+    hd, f = profile.print_image(s)
+    assert f == HD and hd.shape == (s.height * HD, s.width * HD)
+    # Профиль прежней версии: картинок @2x нет — печать всё равно в HD.
+    old = tmp_path / "old"
+    shutil.copytree(profile.root, old)
+    for p in (old / "samples").glob("*@*x.png"):
+        p.unlink()
+    legacy = Profile.load(old)
+    hd2, f2 = legacy.print_image(legacy.samples[0])
+    assert f2 == HD and hd2.shape == hd.shape
+    legacy.remove(legacy.samples[0].id)
+    assert not (old / hd_name(s.file)).exists()

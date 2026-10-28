@@ -15,6 +15,7 @@ GRID_COLOR = np.array([168, 200, 232], np.float32)
 MARGIN_COLOR = np.array([226, 104, 118], np.float32)
 PAPER_COLOR = np.array([250, 250, 246], np.float32)
 MISSING_COLOR = np.array([255, 243, 170], np.float32)
+HD_MIN_DPI = 200  # с этой плотности страницы буквы берутся в 600 dpi (PDF, печать)
 
 
 def _paper(s: Settings, rng: np.random.Generator) -> np.ndarray:
@@ -24,8 +25,10 @@ def _paper(s: Settings, rng: np.random.Generator) -> np.ndarray:
     page[:] = PAPER_COLOR
     if s.paper_texture:
         low = cv2.resize(rng.normal(0, 1, (12, 9)).astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
-        page += (low * 2.5)[..., None]
-        page += rng.normal(0, 1.6, (h, w, 1)).astype(np.float32)
+        low *= 2.5
+        page += low[..., None]
+        del low
+        page += rng.standard_normal((h, w, 1), dtype=np.float32) * np.float32(1.6)
 
     def hline(y_mm: float, color, width: int = 1, alpha: float = 0.85):
         y = int(round(mm_to_px(y_mm, s.dpi)))
@@ -68,47 +71,57 @@ def _blend(page: np.ndarray, alpha: np.ndarray, x0: int, y0: int, color: np.ndar
     roi += color * a
 
 
-def smooth_stroke(a: np.ndarray, amount: float) -> np.ndarray:
+def smooth_stroke(a: np.ndarray, amount: float, scale: int = 1) -> np.ndarray:
     """Заглаживает штрих шариковой ручки: закрывает пропуски, где шарик
     не провернулся, и выравнивает зернистую плотность внутри линии.
 
     Толщина линии сохраняется, бледные места не пропадают. amount 0 — как
-    в скане, 1 — ровная линия, как у гелевой ручки."""
+    в скане, 1 — ровная линия, как у гелевой ручки. scale — во сколько раз
+    образец плотнее 300 dpi."""
     if amount <= 0:
         return a
-    closed = cv2.morphologyEx(a, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
-    blur = cv2.GaussianBlur(closed, (0, 0), 0.6 + 0.6 * amount)
+    k = 2 * scale + 1
+    closed = cv2.morphologyEx(a, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    blur = cv2.GaussianBlur(closed, (0, 0), (0.6 + 0.6 * amount) * scale)
     t = np.clip((blur - 0.3) / 0.35, 0.0, 1.0)
     solid = np.maximum(t * t * (3 - 2 * t), np.clip(blur * 1.6, 0.0, 1.0))
     return ((1 - amount) * a + amount * solid).astype(np.float32)
 
 
-def normalized_image(profile: Profile, sample, smoothness: float = 0.0) -> np.ndarray:
-    """Образец с толщиной линии, приведённой к общей для профиля.
+def normalized_image(profile: Profile, sample, smoothness: float = 0.0, hd: bool = False) -> tuple[np.ndarray, int]:
+    """Образец с толщиной линии, приведённой к общей для профиля, и во
+    сколько раз он плотнее 300 dpi.
 
     Образцы с разных страниц скана выходят то тоньше, то жирнее (свет,
     резкость). Настоящая ручка пишет одной толщиной, поэтому слишком жирные
-    образцы слегка «сужаем», а слишком тонкие — утолщаем."""
+    образцы слегка «сужаем», а слишком тонкие — утолщаем.
+
+    hd: взять образец в 600 dpi — для печати и PDF. Предпросмотр мелкий,
+    ему хватает 300 dpi, и так быстрее."""
     smoothness = round(float(np.clip(smoothness, 0.0, 1.0)), 2)
-    key = f"{sample.id}:norm:{smoothness}"
+    key = f"{sample.id}:norm:{smoothness}:{int(hd)}"
     if key not in profile._cache:
-        a = profile.image(sample)
+        a, f = profile.print_image(sample) if hd else (profile.image(sample), 1)
         target = mm_to_px(profile.params.stroke_mm, SAMPLE_DPI)
-        k = (sample.stroke_px - target) / 2.0 if sample.stroke_px > 0 else 0.0
+        k = (sample.stroke_px - target) / 2.0 * f if sample.stroke_px > 0 else 0.0
         r = int(round(abs(k)))
         if r >= 1:
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
             a = cv2.erode(a, kernel) if k > 0 else cv2.dilate(a, kernel)
-        profile._cache[key] = smooth_stroke(a, smoothness)
+        profile._cache[key] = (smooth_stroke(a, smoothness, f), f)
     return profile._cache[key]
 
 
 def _draw_glyph(page: np.ndarray, g: Glyph, profile: Profile, s: Settings, ink: np.ndarray) -> None:
-    src = normalized_image(profile, g.sample, s.smoothness) if not g.fallback else profile.image(g.sample)
+    if g.fallback:
+        src, f = profile.image(g.sample), 1
+    else:
+        src, f = normalized_image(profile, g.sample, s.smoothness, hd=s.dpi >= HD_MIN_DPI)
     ppm = mm_to_px(1.0, s.dpi)
     c, sn = math.cos(g.rot), math.sin(g.rot)
     lin = ppm * g.scale * np.array([[c, -sn], [sn, c]]) @ np.array([[1.0, -g.shear], [0.0, 1.0]])
     origin = np.array([g.x * ppm, g.y * ppm]) - lin @ np.array([0.0, g.sample.baseline])
+    lin = lin / f  # координаты образца в GlyphSample — в пикселях 300 dpi
     h, w = src.shape
     corners = np.array([[0, 0], [w, 0], [0, h], [w, h]], float) @ lin.T + origin
     x0, y0 = np.floor(corners.min(axis=0)).astype(int) - 1
@@ -168,7 +181,8 @@ def render_page(page: Page, profile: Profile, s: Settings, index: int = 0) -> Im
     for g in page.glyphs:
         ink = np.clip(base_ink + rng.normal(0, 4, 3), 0, 255).astype(np.float32)
         _draw_glyph(canvas, g, profile, s, ink)
-    return Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8), "RGB")
+    np.clip(canvas, 0, 255, out=canvas)  # на месте: при печати страница большая
+    return Image.fromarray(canvas.astype(np.uint8), "RGB")
 
 
 def render(layout: Layout, profile: Profile) -> list[Image.Image]:
