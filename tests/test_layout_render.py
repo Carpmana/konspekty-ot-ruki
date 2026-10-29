@@ -254,3 +254,18 @@ def test_weight_changes_stroke_gradually(profile):
     vals = [ink(w) for w in (0.62, 0.8, 0.93, 1.0, 1.15, 1.4, 2.0)]
     assert all(a < b for a, b in zip(vals, vals[1:]))
     assert vals[0] < 0.9 * vals[3] and vals[-1] > 1.3 * vals[3]
+
+
+def test_belarusian_without_samples_is_reported(profile):
+    """Нет образцов ў, Ў, І — предупреждаем; і пишется как латинская i,
+    обычный апостроф — как ’ (его тоже нет в основном бланке)."""
+    layout = typeset("Ўсе дзеці ішлі ў школу. Інфармацыя сям'я", profile, Settings(seed=1))
+    assert layout.missing == {"ў", "Ў", "І", "'"}
+    assert reconstruct_text(layout) == ["Ўсе", "дзеці", "ішлі", "ў", "школу.", "Інфармацыя", "сям'я"]
+
+
+def test_hyphenation_language_by_word():
+    from konspekt.layout import word_lang
+    assert word_lang("understanding") == "en_US"
+    assert word_lang("інфармацыя") == "be_BY"
+    assert word_lang("информация") == "ru_RU"

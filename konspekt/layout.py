@@ -13,7 +13,7 @@ import pyphen
 from PIL import Image, ImageDraw, ImageFont
 
 from . import document as doc
-from .charset import BODY, HEADING
+from .charset import APOSTROPHES, BODY, HEADING
 from .profile import SAMPLE_DPI, GlyphSample, Profile, stroke_width_px
 from .units import A4_MM, A5_MM, mm_to_px, px_to_mm
 from .shape import ROW_MM, band_profile, edges, entry_point, exit_point, optical_x
@@ -26,6 +26,9 @@ ARROWS = {"->": "right", "→": "right", "=>": "double", "⇒": "double",
           "<-": "left", "←": "left", "<->": "both", "↔": "both"}
 SCRIPT_SCALE = 0.62
 LATIN_TWINS = dict(zip("ABCEHKMOPTXaceopxyu", "АВСЕНКМОРТХасеорхуи"))
+# Знаки, которые на бумаге пишутся одинаково: белорусская і — как латинская i,
+# любой апостроф — как ’ из белорусского бланка.
+TWINS = {**LATIN_TWINS, "і": "i", "i": "і", **{a: "’" for a in APOSTROPHES}}
 
 
 def script_marks(word: str) -> tuple[str, list[str]]:
@@ -210,7 +213,7 @@ class Typesetter:
         self.fallbacks = FallbackGlyphs(profile)
         self.clusters = profile.clusters()
         self.missing: set[str] = set()
-        self.hyph = pyphen.Pyphen(lang="ru_RU")
+        self.hyph = {lang: pyphen.Pyphen(lang=lang) for lang in ("ru_RU", "be_BY", "en_US")}
         xh = settings.x_height_mm or self.hp.x_height_mm
         self.xh_mm = xh
         self._shapes: dict = {}
@@ -278,8 +281,8 @@ class Typesetter:
         vs = self.p.variants(ch, style)
         if not vs and style == HEADING:
             vs = self.p.variants(ch, BODY)
-        if not vs and ch in LATIN_TWINS:  # латинская H пишется так же, как русская Н
-            vs = self.p.variants(LATIN_TWINS[ch], style) or self.p.variants(LATIN_TWINS[ch], BODY)
+        if not vs and ch in TWINS:  # латинская H пишется так же, как русская Н
+            vs = self.p.variants(TWINS[ch], style) or self.p.variants(TWINS[ch], BODY)
         if vs:
             return self.picker.pick(f"{style}:{ch}", vs), ch, False
         self.missing.add(ch)
@@ -542,13 +545,23 @@ class Typesetter:
         core = word.rstrip(".,:;!?»)")
         if len(core) < 5 or not core.isalpha():
             return None
-        for pos in reversed(self.hyph.positions(core)):
+        for pos in reversed(self.hyph[word_lang(core)].positions(core)):
             if pos < 2 or len(word) - pos < 2:
                 continue
             head = self.build_word(word[:pos] + "-", style, trace=word[:pos])
             if head.width <= room:
                 return head, self.build_word(word[pos:], style)
         return None
+
+
+def word_lang(word: str) -> str:
+    """Словарь переносов по самому слову: латиница — английский,
+    с і или ў — белорусский, иначе русский."""
+    if word.isascii():
+        return "en_US"
+    if any(c in "іІўЎ" for c in word):
+        return "be_BY"
+    return "ru_RU"
 
 
 def _deco_marks(word: str) -> tuple[str, set[str], set[str]]:

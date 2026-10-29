@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .charset import BODY, DIGITS, LAT_LOWER, PUNCT, RU_BY_FREQUENCY, RU_LOWER, RU_UPPER
+from .charset import BE_ONLY, BODY, DIGITS, EN_PUNCT, LAT_LOWER, LAT_UPPER, PUNCT, RU_BY_FREQUENCY, RU_LOWER, RU_UPPER
 from .extract import HD, ExtractedSample, refill, upscale_legacy
 from .units import px_to_mm
 
@@ -345,7 +345,8 @@ class Profile:
         def count(ch: str) -> int:
             return len(self.variants(ch))
         groups = {"строчные": RU_LOWER, "заглавные": RU_UPPER, "цифры": DIGITS,
-                  "знаки": PUNCT, "латиница": LAT_LOWER}
+                  "знаки": PUNCT, "латиница": LAT_LOWER,
+                  "латиница заглавные": LAT_UPPER + EN_PUNCT, "белорусские": BE_ONLY}
         out = {}
         for gname, chars in groups.items():
             missing = [c for c in chars if count(c) == 0]
@@ -372,8 +373,11 @@ def file_sha256(path: str | Path) -> str:
 
 def stroke_width_px(alpha: np.ndarray) -> float:
     mask = (alpha > 0.35).astype(np.uint8)
-    if mask.sum() == 0:
+    if not mask.any():
         return 0.0
+    # Рамка из фона: иначе у знака, который занимает весь кадр (апостроф),
+    # расстояние до фона не определено.
+    mask = np.pad(mask, 1)
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
     skel = cv2.ximgproc.thinning(mask * 255) > 0
     vals = dist[skel]

@@ -12,13 +12,15 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .charset import HEADING, SampleRequest, extra_requests, sample_requests
+from .charset import HEADING, SampleRequest, be_requests, en_requests, extra_requests, sample_requests
 from .units import A4_MM, mm_to_px
 
 TEMPLATE_VERSION = 1
 DPI = 300
-ARUCO_DICT = cv2.aruco.DICT_4X4_50
-MAX_PAGES = 12
+# Первые 50 меток DICT_4X4_100 совпадают с DICT_4X4_50, поэтому старые
+# распечатанные бланки по-прежнему распознаются.
+ARUCO_DICT = cv2.aruco.DICT_4X4_100
+MAX_PAGES = 25
 
 MARKER_MM = 12.0
 # Центры меток: левый верх, правый верх, правый низ, левый низ.
@@ -77,6 +79,8 @@ class TemplateSet:
 TEMPLATE_SETS = {
     "main": TemplateSet("main", "основной", sample_requests, 0),
     "extra": TemplateSet("extra", "дополнительный", extra_requests, 5),
+    "be": TemplateSet("be", "белорусский", be_requests, 10),
+    "en": TemplateSet("en", "английский", en_requests, 12),
 }
 
 
