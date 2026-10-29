@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import (
-    QEasingCurve, QObject, QProcess, QPropertyAnimation, QRectF, QRunnable, QSettings, QSize, QSizeF, Qt, QThreadPool,
+    QEasingCurve, QFile, QObject, QProcess, QPropertyAnimation, QRectF, QRunnable, QSettings, QSize, QSizeF, Qt, QThreadPool,
     QTimer, QUrl, Signal, Slot,
 )
 from PySide6.QtGui import (
@@ -24,7 +24,7 @@ from PySide6.QtGui import (
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
     QSlider, QSpinBox, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
@@ -1208,7 +1208,14 @@ class MainWindow(QMainWindow):
         sl = section("Почерк", "pen", text_side_l)
         self.profile_box = QComboBox()
         self.profile_box.currentIndexChanged.connect(self._profile_changed)
-        sl.addWidget(self.profile_box)
+        prow = QHBoxLayout()
+        prow.addWidget(self.profile_box, 1)
+        del_profile = QToolButton(objectName="iconButton")
+        del_profile.setIcon(icons.icon("trash"))
+        del_profile.setToolTip("Удалить этот почерк (в Корзину, с подтверждением)")
+        del_profile.clicked.connect(self.delete_profile)
+        prow.addWidget(del_profile)
+        sl.addLayout(prow)
         row = QHBoxLayout()
         imp = QPushButton("Импорт сканов…")
         imp.clicked.connect(self.import_scans)
@@ -1237,6 +1244,26 @@ class MainWindow(QMainWindow):
             self.ink_box.addItem(title, key)
         self.ink_box.setToolTip("Каким цветом печатать почерк, чем бы ни были написаны образцы")
         field("Цвет ручки", self.ink_box)
+
+        sl = section("Шаблоны вида", "bookmark", view_side_l)
+        self.tpl_box = QComboBox()
+        self.tpl_box.setPlaceholderText("— свой вид —")
+        self.tpl_box.setToolTip("Сохранённые наборы настроек вида: выберите, и бумага, линовка, размер, "
+                                "толщина линии, цвет ручки и ползунки письма станут как в шаблоне")
+        self.tpl_box.activated.connect(self._template_chosen)
+        sl.addWidget(self.tpl_box)
+        trow = QHBoxLayout()
+        save_tpl = QPushButton("Сохранить как шаблон…")
+        save_tpl.setToolTip("Запомнить текущие настройки вида под своим названием. "
+                            "То же название — перезаписать шаблон")
+        save_tpl.clicked.connect(lambda: self.save_view_template())
+        trow.addWidget(save_tpl, 1)
+        self.del_tpl = QToolButton(objectName="iconButton")
+        self.del_tpl.setIcon(icons.icon("trash"))
+        self.del_tpl.setToolTip("Удалить выбранный шаблон")
+        self.del_tpl.clicked.connect(lambda: self.delete_view_template())
+        trow.addWidget(self.del_tpl)
+        sl.addLayout(trow)
 
         sl = section("Бумага", "paper", view_side_l)
         self.page_box = QComboBox()
@@ -1553,6 +1580,12 @@ class MainWindow(QMainWindow):
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
             sig.connect(self.schedule_preview)
+        for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
+                    self.ink_box.currentIndexChanged, self.margin_box.currentIndexChanged,
+                    self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
+                    self.edge_slider.valueChanged, self.smooth_slider.valueChanged, self.weight_slider.valueChanged,
+                    self.size_spin.valueChanged, self.pitch_spin.valueChanged):
+            sig.connect(self._sync_template)
         self.text_edit.textChanged.connect(self._update_counter)
         self.page_box.currentIndexChanged.connect(self._format_changed)
         self.paper_box.currentIndexChanged.connect(self._lining_changed)
@@ -1580,7 +1613,8 @@ class MainWindow(QMainWindow):
         else:
             pr = "на чистый лист"
         name = self.profile_box.currentText() or "нет"
-        for title, text in (("Почерк", name), ("Бумага", f"{fmt}, {paper}"),
+        tpl = self.tpl_box.currentText() or "свой вид"
+        for title, text in (("Почерк", name), ("Шаблоны вида", tpl), ("Бумага", f"{fmt}, {paper}"),
                             ("Письмо", f"вариант {self.seed_spin.value()}, {how}"), ("Печать", pr)):
             if title in self.sections:
                 self.sections[title].set_summary(text)
@@ -1633,6 +1667,7 @@ class MainWindow(QMainWindow):
         act(m, "Что есть в профиле", self.show_coverage)
         act(m, "Редактор букв…", self.edit_samples, "Ctrl+B")
         act(m, "Нарисовать буквы…", self.draw_letters, "Ctrl+D")
+        act(m, "Удалить почерк…", self.delete_profile)
         m.addSeparator()
         act(m, "Открыть папку профилей", self.open_profiles_dir)
         act(m, "Выбрать папку профилей…", self.choose_profiles_dir)
@@ -1644,6 +1679,9 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("Вид")
         act(m, "Перегенерировать (следующий вариант)", self.next_variant, "Ctrl+R")
         act(m, "Обновить предпросмотр", self.refresh_preview, "F5")
+        m.addSeparator()
+        act(m, "Сохранить вид как шаблон…", lambda: self.save_view_template())
+        act(m, "Удалить шаблон вида…", lambda: self.delete_view_template())
         m.addSeparator()
         act(m, "Шаг 1: текст", lambda: self.go_step(0), "Ctrl+1")
         act(m, "Шаг 2: вид", lambda: self.go_step(1), "Ctrl+2")
@@ -1689,6 +1727,7 @@ class MainWindow(QMainWindow):
         if mode in ("page", "pair", "all"):
             self.pages.set_mode(mode)
         self._update_counter()
+        self._fill_templates(q.value("view_template", ""))
         self._update_summaries()
 
     def _save_settings(self):
@@ -1717,6 +1756,7 @@ class MainWindow(QMainWindow):
         q.setValue("pitch_mm", self.pitch_spin.value())
         q.setValue("profile", self.profile_box.currentText())
         q.setValue("profiles_dir", str(self.profiles_dir))
+        q.setValue("view_template", self.tpl_box.currentText())
 
     def closeEvent(self, e):
         self._save_settings()
@@ -1734,6 +1774,107 @@ class MainWindow(QMainWindow):
                           corrections=self.fix_slider.value() / 200, live_edge=self.edge_slider.value() / 5,
                           flip_back=self.flip_back.isChecked(), smoothness=self.smooth_slider.value() / 10,
                           ink=self.ink_box.currentData(), weight=slider_weight(self.weight_slider.value()))
+
+    # ---------- шаблоны вида ----------
+
+    def view_values(self) -> dict:
+        """Текущие настройки вида, как в шаблоне (ключи sv.VIEW_TEMPLATE_KEYS)."""
+        return {"page": self.page_box.currentData(), "paper": self.paper_box.currentData(),
+                "margins": self.margin_box.currentData(), "ink": self.ink_box.currentData(),
+                "neatness10": self.neat_slider.value(), "tiredness10": self.tired_slider.value(),
+                "corrections10": self.fix_slider.value(), "live_edge10": self.edge_slider.value(),
+                "smooth10": self.smooth_slider.value(), "weight10": self.weight_slider.value(),
+                "size_mm": self.size_spin.value(), "pitch_mm": self.pitch_spin.value()}
+
+    def apply_view(self, vals: dict):
+        """Ставит настройки из шаблона. Формат и линовка идут первыми: при их смене
+        окно само подбирает поле и шаг строк, а шаблон потом ставит свои."""
+        def combo(box, key):
+            if key in vals:
+                i = box.findData(vals[key])
+                if i >= 0:
+                    box.setCurrentIndex(i)
+        combo(self.page_box, "page")
+        combo(self.paper_box, "paper")
+        combo(self.margin_box, "margins")
+        combo(self.ink_box, "ink")
+        for w, key in ((self.neat_slider, "neatness10"), (self.tired_slider, "tiredness10"),
+                       (self.fix_slider, "corrections10"), (self.edge_slider, "live_edge10"),
+                       (self.smooth_slider, "smooth10"), (self.weight_slider, "weight10")):
+            if key in vals:
+                w.setValue(int(vals[key]))
+        for w, key in ((self.size_spin, "size_mm"), (self.pitch_spin, "pitch_mm")):
+            if key in vals:
+                w.setValue(float(vals[key]))
+
+    def view_templates(self) -> dict[str, dict]:
+        return sv.load_view_templates(self.qs.value("view_templates", ""))
+
+    def _fill_templates(self, select: str = ""):
+        self.tpl_box.blockSignals(True)
+        self.tpl_box.clear()
+        for name in sorted(self.view_templates(), key=str.lower):
+            self.tpl_box.addItem(name)
+        self.tpl_box.setCurrentIndex(self.tpl_box.findText(select) if select else -1)
+        self.tpl_box.blockSignals(False)
+        self._sync_template()
+
+    def _template_chosen(self, i: int):
+        vals = self.view_templates().get(self.tpl_box.itemText(i))
+        if vals is not None:
+            self.apply_view(vals)
+            self.tpl_box.setCurrentIndex(i)  # пока ставились значения, совпадение могло сброситься
+            self._sync_template()
+
+    def _sync_template(self, *_):
+        """Если настройки после выбора шаблона поменяли, шаблон больше не выбран:
+        видно, что сейчас «свой вид», и что его можно сохранить."""
+        if not hasattr(self, "tpl_box"):
+            return
+        name = self.tpl_box.currentText()
+        vals = self.view_templates().get(name) if name else None
+        if name and (vals is None or any(self.view_values().get(k) != v for k, v in vals.items())):
+            self.tpl_box.setCurrentIndex(-1)
+        self.del_tpl.setEnabled(self.tpl_box.currentIndex() >= 0)
+        self._update_summaries()
+
+    def save_view_template(self, name: str | None = None) -> bool:
+        """Сохраняет текущий вид под названием (спрашивает его). Если такой шаблон
+        уже есть, спрашивает, перезаписать ли."""
+        templates = self.view_templates()
+        if name is None:
+            name, ok = QInputDialog.getText(
+                self, "Шаблон вида",
+                "Название шаблона (то же название — перезаписать):\n"
+                "сохранятся бумага, линовка, поле, цвет ручки, размер букв, шаг строк, толщина линии и ползунки письма.",
+                QLineEdit.Normal, self.tpl_box.currentText())
+            if not ok:
+                return False
+        name = (name or "").strip()
+        if not name:
+            return False
+        if name in templates and QMessageBox.question(
+                self, APP_NAME, f"Шаблон «{name}» уже есть. Перезаписать его текущими настройками?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return False
+        templates[name] = self.view_values()
+        self.qs.setValue("view_templates", sv.dump_view_templates(templates))
+        self._fill_templates(name)
+        return True
+
+    def delete_view_template(self, name: str | None = None) -> bool:
+        name = name or self.tpl_box.currentText()
+        templates = self.view_templates()
+        if name not in templates:
+            QMessageBox.information(self, APP_NAME, "Сначала выберите шаблон в списке «Шаблоны вида».")
+            return False
+        if QMessageBox.question(self, APP_NAME, f"Удалить шаблон вида «{name}»? Текущие настройки не изменятся.",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return False
+        del templates[name]
+        self.qs.setValue("view_templates", sv.dump_view_templates(templates))
+        self._fill_templates()
+        return True
 
     # ---------- профили ----------
 
@@ -1845,6 +1986,66 @@ class MainWindow(QMainWindow):
         if d:
             self.profiles_dir = Path(d)
             self.reload_profiles()
+
+    def confirm_delete_profile(self, name: str, path: Path) -> bool:
+        """Спрашивает, удалить ли почерк. Свой почерк — только после галочки:
+        его не вернёшь без повторного сканирования (разве что из Корзины)."""
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        if name == sv.DEMO_NAME:
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"Удалить «{name}»?")
+            box.setInformativeText("Это пример, написанный шрифтом. Вернуть его можно в любой момент: "
+                                   "Справка → Попробовать на примере почерка.")
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            return box.exec() == QMessageBox.Yes
+        try:
+            n = len(Profile.load(path).samples)
+            count = f"В нём {n} {_plural(n, 'образец', 'образца', 'образцов')} букв. "
+        except Exception:
+            count = ""
+        others = [p for p in self.own_profiles() if Path(p[1]).resolve() != Path(path).resolve()]
+        last = "" if others else ("\n\nЭто ваш единственный почерк: пока не импортируете сканы снова, "
+                                  "программа не сможет писать конспекты вашей рукой.")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"Удалить почерк «{name}»?")
+        box.setInformativeText(f"{count}Папка почерка уйдёт в Корзину, оттуда её можно восстановить.{last}")
+        sure = QCheckBox(f"Да, удалить мой почерк «{name}»")
+        box.setCheckBox(sure)
+        delete = box.addButton("Удалить", QMessageBox.DestructiveRole)
+        cancel = box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        delete.setEnabled(False)
+        sure.toggled.connect(delete.setEnabled)
+        box.exec()
+        return box.clickedButton() is delete and sure.isChecked()
+
+    def delete_profile(self) -> bool:
+        name = self.profile_box.currentText()
+        path = self.profile_box.currentData()
+        if not path:
+            QMessageBox.information(self, APP_NAME, "Почерков пока нет — удалять нечего.")
+            return False
+        if self.busy():
+            QMessageBox.information(self, APP_NAME, "Подождите, пока закончится текущее действие, и попробуйте снова.")
+            return False
+        if not self.confirm_delete_profile(name, Path(path)):
+            return False
+        self.profile = None
+        try:
+            moved = sv.delete_profile(self.profiles_dir, path, trash=_move_to_trash)
+        except Exception as e:
+            QMessageBox.warning(self, APP_NAME, f"Не удалось удалить почерк «{name}»:\n{e}")
+            self.reload_profiles(name)
+            return False
+        self.reload_profiles()
+        if moved is not None:
+            QMessageBox.information(self, APP_NAME, f"Почерк «{name}» убран из программы. Корзина недоступна, "
+                                    f"поэтому папка перенесена сюда (её можно вернуть обратно):\n{moved}")
+        else:
+            self.statusBar().showMessage(f"Почерк «{name}» перемещён в Корзину", 6000)
+        return True
 
     def own_profiles(self) -> list[tuple[str, Path]]:
         """Профили, кроме примера почерка."""
@@ -2417,6 +2618,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, msg)
 
         self._start(Task(fn, *args, on_done=ok, on_fail=fail))
+
+
+def _move_to_trash(path: str) -> bool:
+    res = QFile.moveToTrash(path)
+    return bool(res[0] if isinstance(res, tuple) else res)
 
 
 def _duration(seconds: float) -> str:

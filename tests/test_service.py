@@ -307,3 +307,46 @@ def test_demo_profile_renders_demo_text(tmp_path):
     assert len(prof.samples) > 300
     r = sv.render_text(sv.DEMO_TEXT, prof, sv.Options(), 60)
     assert r.images and not r.missing
+
+
+def test_delete_profile_goes_to_trash_or_aside(tmp_path):
+    root = tmp_path / "profiles"
+    a = Profile.create(root / "Мой", "Мой").root
+    b = Profile.create(root / "Второй", "Второй").root
+    trashed = []
+
+    def trash(p):
+        import shutil
+        trashed.append(p)
+        shutil.rmtree(p)
+        return True
+
+    assert sv.delete_profile(root, a, trash=trash) is None
+    assert trashed == [str(a.resolve())] and not a.exists()
+    moved = sv.delete_profile(root, b, trash=lambda p: False)  # Корзины нет: переносим, не стираем
+    assert moved == sv.removed_profiles_dir(root) / "Второй"
+    assert (moved / "profile.json").exists() and not b.exists()
+    assert sv.list_profiles(root) == []
+    again = Profile.create(root / "Второй", "Второй").root
+    moved2 = sv.delete_profile(root, again)
+    assert moved2 != moved and moved.exists() and moved2.exists()
+
+
+def test_delete_profile_refuses_foreign_folders(tmp_path):
+    root = tmp_path / "profiles"
+    Profile.create(root / "Мой", "Мой")
+    other = tmp_path / "чужая"
+    other.mkdir()
+    (other / "profile.json").write_text("{}", encoding="utf-8")
+    for bad in (other, root, root / "нет", root / "Мой" / ".."):
+        with pytest.raises(ValueError):
+            sv.delete_profile(root, bad)
+    assert other.exists() and (root / "Мой" / "profile.json").exists()
+
+
+def test_view_templates_roundtrip():
+    t = {"Тетрадь": {"paper": "lines", "weight10": 3, "лишнее": 1}, " ": {"paper": "grid"}}
+    loaded = sv.load_view_templates(sv.dump_view_templates(t))
+    assert loaded == {"Тетрадь": {"paper": "lines", "weight10": 3}}
+    for bad in ("", None, "не json", "[1, 2]"):
+        assert sv.load_view_templates(bad) == {}
