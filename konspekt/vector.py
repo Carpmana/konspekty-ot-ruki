@@ -12,7 +12,8 @@ import numpy as np
 
 UPSAMPLE = 2  # контур ищем на сетке вдвое мельче образца: край точнее
 SHIFT = 4  # субпиксельная точность заливки
-MIN_LEVEL, MAX_LEVEL = 0.15, 0.25  # пределы порога «чернила / бумага»
+SS = 4  # во сколько раз крупнее заливаем ради точного сглаженного края
+MIN_LEVEL, MAX_LEVEL = 0.15, 0.5  # пределы порога «чернила / бумага»
 
 
 def solid_mask(alpha: np.ndarray, smoothness: float, scale: int) -> np.ndarray:
@@ -79,14 +80,20 @@ def _smooth_closed(pts: np.ndarray, sigma: float) -> np.ndarray:
 
 def fill(contours: list[np.ndarray], lin: np.ndarray, origin: np.ndarray) -> tuple[np.ndarray, int, int]:
     """Заливает контуры, переведённые на страницу (x' = lin·x + origin), со
-    сглаженным краем. Возвращает прозрачность и левый верхний угол."""
+    сглаженным краем. Возвращает прозрачность и левый верхний угол.
+
+    Край сглаживаем честно: заливаем в SS раз крупнее и уменьшаем по
+    площади. Встроенное сглаживание OpenCV добавляет по полпикселя с каждой
+    стороны, и на странице линия выходила заметно толще, чем на скане."""
     if not contours:
         return np.zeros((1, 1), np.float32), 0, 0
     placed = [c @ lin.T + origin for c in contours]
     allp = np.vstack(placed)
     x0, y0 = np.floor(allp.min(axis=0)).astype(int) - 2
     x1, y1 = np.ceil(allp.max(axis=0)).astype(int) + 2
-    canvas = np.zeros((y1 - y0, x1 - x0), np.uint8)
-    polys = [np.round((p - [x0, y0]) * (1 << SHIFT)).astype(np.int32) for p in placed]
-    cv2.fillPoly(canvas, polys, 255, cv2.LINE_AA, SHIFT)
-    return canvas.astype(np.float32) / 255.0, int(x0), int(y0)
+    w, h = int(x1 - x0), int(y1 - y0)
+    canvas = np.zeros((h * SS, w * SS), np.uint8)
+    polys = [np.round((p - [x0, y0]) * SS * (1 << SHIFT)).astype(np.int32) for p in placed]
+    cv2.fillPoly(canvas, polys, 255, cv2.LINE_8, SHIFT)
+    a = cv2.resize(canvas, (w, h), interpolation=cv2.INTER_AREA)
+    return a.astype(np.float32) / 255.0, int(x0), int(y0)

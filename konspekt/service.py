@@ -326,6 +326,7 @@ class Options:
     flip_back: bool = False  # двойной листок: внутренняя сторона печатается повёрнутой на 180°
     smoothness: float = 0.5  # 0–1: насколько плавные контуры букв (0 — как в скане)
     ink: str = ""  # цвет ручки из INKS; пусто — как в профиле
+    weight: float = 1.0  # толщина линии: 1 — как на скане
 
     @property
     def fmt(self) -> PageFormat:
@@ -356,7 +357,8 @@ class Options:
                             margin_left_mm=f.outer_mm if mode != "none" else f.inner_mm,
                             margin_right_mm=f.inner_mm,
                             tiredness=self.tiredness, corrections=self.corrections, live_edge=self.live_edge,
-                            smoothness=self.smoothness, ink_color=INK_COLORS.get(self.ink))
+                            smoothness=self.smoothness, ink_color=INK_COLORS.get(self.ink),
+                            weight=self.weight)
 
 
 @dataclass

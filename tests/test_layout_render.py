@@ -243,3 +243,14 @@ def test_solid_print_has_no_grey_ink(profile):
     im = np.asarray(render(typeset(TEXT[:200], profile, s), profile)[0])
     colors = {tuple(c) for c in im.reshape(-1, 3)}
     assert colors == {(255, 255, 255), (0, 0, 0)}
+
+
+def test_weight_changes_stroke_gradually(profile):
+    # Толщина линии меняется плавно: каждый шаг ползунка даёт чуть больше чернил.
+    def ink(w):
+        s = Settings(seed=2, dpi=150, paper="blank", weight=w)
+        im = np.asarray(render(typeset(TEXT[:120], profile, s), profile)[0].convert("L"), np.float32)
+        return float((255 - im).sum())
+    vals = [ink(w) for w in (0.62, 0.8, 0.93, 1.0, 1.15, 1.4, 2.0)]
+    assert all(a < b for a, b in zip(vals, vals[1:]))
+    assert vals[0] < 0.9 * vals[3] and vals[-1] > 1.3 * vals[3]

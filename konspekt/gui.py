@@ -415,11 +415,22 @@ SLIDER_HELP = {
         "шрифт. Правее — изгибы плавнее. Толщина линии не меняется.\n"
         "0 — буквы точно как в скане, с зерном ручки. Ваши образцы при этом не меняются, только то, "
         "как они печатаются."),
+    "Толщина линии": (
+        "Насколько толстой линией пишутся буквы, соединения и подчёркивания.\n\n"
+        "Посередине — как на скане вашей ручкой. Влево — тоньше (примерно на треть), вправо — толще, до двух раз. "
+        "Меняется плавно и сразу видно в предпросмотре. Образцы при этом не меняются."),
     "Размер": (
         "Во сколько раз крупнее или мельче писать эту букву в тексте. 100% — как в образцах.\n\n"
         "Пригодится, если какая-то буква в бланке вышла заметно больше или меньше остальных. "
         "Размер отдельного варианта меняется в процентах под ним."),
 }
+
+
+def slider_weight(v: int) -> float:
+    """Положение ползунка толщины (−10…10) → множитель толщины линии.
+    Посередине 1 (как на скане), вправо до двух раз толще, влево до 0,6:
+    тоньше тонкие штрихи начинают рваться."""
+    return 2.0 ** (v / 10) if v >= 0 else 2.0 ** (0.07 * v)
 
 
 def help_button(title: str, parent: QWidget | None = None) -> QToolButton:
@@ -1295,6 +1306,18 @@ class MainWindow(QMainWindow):
         smends.addStretch(1)
         smends.addWidget(QLabel("гладко", objectName="hint"))
         sl.addLayout(smends)
+        self.weight_slider = QSlider(Qt.Horizontal)
+        self.weight_slider.setRange(-10, 10)  # см. slider_weight
+        self.weight_slider.setToolTip("Толщина линии букв. Посередине — как на скане")
+        sl.addLayout(slider_title("Толщина линии"))
+        sl.addWidget(self.weight_slider)
+        wends = QHBoxLayout()
+        wends.addWidget(QLabel("тоньше", objectName="hint"))
+        wends.addStretch(1)
+        wends.addWidget(QLabel("как на скане", objectName="hint"))
+        wends.addStretch(1)
+        wends.addWidget(QLabel("толще", objectName="hint"))
+        sl.addLayout(wends)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(0.0, 8.0)
         self.size_spin.setSingleStep(0.25)
@@ -1526,7 +1549,7 @@ class MainWindow(QMainWindow):
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged, self.ink_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
-                    self.edge_slider.valueChanged, self.smooth_slider.valueChanged,
+                    self.edge_slider.valueChanged, self.smooth_slider.valueChanged, self.weight_slider.valueChanged,
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
             sig.connect(self.schedule_preview)
@@ -1652,6 +1675,7 @@ class MainWindow(QMainWindow):
         self.fix_slider.setValue(int(q.value("corrections10", 0)))
         self.edge_slider.setValue(int(q.value("live_edge10", 5)))
         self.smooth_slider.setValue(int(q.value("smooth10", 5)))
+        self.weight_slider.setValue(int(q.value("weight10", 0)))
         self.ink_box.setCurrentIndex(max(0, self.ink_box.findData(q.value("ink", ""))))
         self.size_spin.setValue(float(q.value("size_mm", 0.0)))
         self.pitch_spin.setValue(float(q.value("pitch_mm", 10.0)))
@@ -1687,6 +1711,7 @@ class MainWindow(QMainWindow):
         q.setValue("corrections10", self.fix_slider.value())
         q.setValue("live_edge10", self.edge_slider.value())
         q.setValue("smooth10", self.smooth_slider.value())
+        q.setValue("weight10", self.weight_slider.value())
         q.setValue("ink", self.ink_box.currentData())
         q.setValue("size_mm", self.size_spin.value())
         q.setValue("pitch_mm", self.pitch_spin.value())
@@ -1708,7 +1733,7 @@ class MainWindow(QMainWindow):
                           nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
                           corrections=self.fix_slider.value() / 200, live_edge=self.edge_slider.value() / 5,
                           flip_back=self.flip_back.isChecked(), smoothness=self.smooth_slider.value() / 10,
-                          ink=self.ink_box.currentData())
+                          ink=self.ink_box.currentData(), weight=slider_weight(self.weight_slider.value()))
 
     # ---------- профили ----------
 
