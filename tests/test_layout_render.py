@@ -234,3 +234,12 @@ def test_hd_print_matches_preview(profile):
     ys, xs = np.nonzero(ink_lo > 60)
     yh, xh = np.nonzero(ink_hi > 60)
     assert abs(xs.mean() - xh.mean()) < 2 and abs(ys.mean() - yh.mean()) < 2
+
+
+def test_solid_print_has_no_grey_ink(profile):
+    # Принтер печатает серый растром из точек, поэтому для печати каждый
+    # пиксель — либо белая бумага, либо чернила в полную силу.
+    s = Settings(seed=1, dpi=150, paper="blank", ink_color=(24, 24, 28), solid_print=True)
+    im = np.asarray(render(typeset(TEXT[:200], profile, s), profile)[0])
+    colors = {tuple(c) for c in im.reshape(-1, 3)}
+    assert colors == {(255, 255, 255), (0, 0, 0)}

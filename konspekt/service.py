@@ -16,7 +16,7 @@ from PIL import Image
 from . import layout as lay
 from .extract import ExtractedSample, ImportReport, import_files
 from .profile import PROFILE_FILE, GlyphSample, Profile, safe_folder_name
-from .render import PAPER_COLOR, render_page, save_pdf
+from .render import render_page, save_pdf
 from .units import mm_to_px
 
 PAPERS = [("grid", "В клетку"), ("lines", "В линейку"), ("blank", "Без линий")]
@@ -393,12 +393,6 @@ def _mirror_page(page: lay.Page, dx: float) -> lay.Page:
     return replace(page, glyphs=glyphs, connectors=conns, lines=lines)
 
 
-def _ink_only(im: Image.Image) -> Image.Image:
-    """Белый фон вместо бумаги: клетки уже есть на листке."""
-    a = np.asarray(im, np.float32) * (255.0 / PAPER_COLOR)
-    return Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8), "RGB")
-
-
 def printer_shift(im: Image.Image, opts: Options, dpi: int) -> Image.Image:
     """Сдвиг под принтер. Применяется к тому, что целиком ложится в лоток:
     к странице или ко всей стороне двойного листка. Если сдвигать каждую
@@ -417,7 +411,8 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
     """Текст → картинки страниц. Вёрстка в миллиметрах, поэтому предпросмотр
     и печать при разном dpi дают одинаковые страницы.
 
-    for_print с real_paper: на картинке только текст (бумага — настоящий листок)."""
+    for_print: чернила сплошным цветом на белом (см. render._draw_solid); с
+    real_paper на картинке только текст (бумага — настоящий листок)."""
     f = opts.fmt
     if not text.strip():
         return Rendered([], set(), dpi, f.size_mm)
@@ -434,10 +429,11 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
         if opts.margin_mode == "outer" and i % 2 == 0:  # правая страница: поле справа
             page = _mirror_page(page, f.inner_mm - (f.outer_mm + 2.0))
             ps = replace(s, margin_left_mm=W - f.outer_mm)
+        if for_print:
+            ps = replace(ps, solid_print=True)
         if ink_only:
-            ps = replace(ps, paper="blank", paper_texture=False)
-        im = render_page(page, prof, ps, i)
-        images.append(_ink_only(im) if ink_only else im)
+            ps = replace(ps, paper="blank")
+        images.append(render_page(page, prof, ps, i))
     r = Rendered(images, set(layout.missing), dpi, f.size_mm)
     if opts.use_spread:
         r = to_spreads(r, len(layout.pages), opts.nested)

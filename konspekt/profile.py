@@ -23,7 +23,7 @@ import numpy as np
 from PIL import Image
 
 from .charset import BODY, DIGITS, LAT_LOWER, PUNCT, RU_BY_FREQUENCY, RU_LOWER, RU_UPPER
-from .extract import HD, ExtractedSample, upscale_legacy
+from .extract import HD, ExtractedSample, refill, upscale_legacy
 from .units import px_to_mm
 
 SAMPLE_DPI = 300
@@ -253,10 +253,15 @@ class Profile:
             self.imported.append(h)
 
     def image(self, s: GlyphSample) -> np.ndarray:
+        """Образец для вёрстки и отрисовки: чернила залиты (extract.refill)."""
         if s.id not in self._cache:
-            with Image.open(self.root / s.file) as im:
-                self._cache[s.id] = np.asarray(im.convert("L"), np.float32) / 255.0
+            self._cache[s.id] = refill(self.raw_image(s))
         return self._cache[s.id]
+
+    def raw_image(self, s: GlyphSample) -> np.ndarray:
+        """Образец как сохранён, с живой плотностью ручки — для измерений."""
+        with Image.open(self.root / s.file) as im:
+            return np.asarray(im.convert("L"), np.float32) / 255.0
 
     def print_image(self, s: GlyphSample) -> tuple[np.ndarray, int]:
         """Образец для печати и во сколько раз он плотнее 300 dpi.
@@ -266,7 +271,7 @@ class Profile:
             hd = self.root / hd_name(s.file) if s.file else None
             if hd is not None and hd.exists():
                 with Image.open(hd) as im:
-                    self._cache[key] = (np.asarray(im.convert("L"), np.float32) / 255.0, HD)
+                    self._cache[key] = (refill(np.asarray(im.convert("L"), np.float32) / 255.0, HD), HD)
             elif s.file:
                 self._cache[key] = (upscale_legacy(self.image(s), s.text), HD)
             else:
@@ -307,7 +312,7 @@ class Profile:
         for group in groups.values():
             if len(group) < 3:
                 continue
-            ink = [float(self.image(s).sum()) for s in group]
+            ink = [float(self.raw_image(s).sum()) for s in group]
             med = float(np.median(ink))
             out += [s for s, v in zip(group, ink) if med > 0 and v > CROSSED_INK_RATIO * med]
         return out

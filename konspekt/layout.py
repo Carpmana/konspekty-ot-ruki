@@ -91,6 +91,7 @@ class Settings:
     corrections: float = 0.0  # доля слов, перед которыми пишется и зачёркивается ошибка
     live_edge: float = 1.0  # 0–2: насколько гуляет начало строк у левого края (0 — почти ровно)
     smoothness: float = 0.5  # 0–1: насколько плавные контуры букв (0 — как в скане, с зерном ручки)
+    solid_print: bool = False  # для принтера: чернила одним сплошным цветом, бумага белая (см. render)
 
     @property
     def solid_lines(self) -> bool:
@@ -466,6 +467,7 @@ class Typesetter:
                 if not w:
                     deco -= ends
                     continue
+                before = self.picker.snapshot()
                 if w in ARROWS:
                     plan = self.build_arrow(ARROWS[w], w)
                 else:
@@ -486,10 +488,15 @@ class Typesetter:
                     continue
                 # Чуть не влезает — человек сожмёт буквы в конце строки.
                 if x + gap + plan.width <= right + overflow + 0.12 * plan.width:
+                    # Сжатое слово выбирает буквы заново: отличаться они должны
+                    # от предыдущего слова, а не от отброшенного варианта.
+                    picked = self.picker.snapshot()
+                    self.picker.restore(before)
                     squeezed = self.build_word(w, style, tight=0.45)
                     if x + gap * 0.7 + squeezed.width <= right + overflow:
                         place(squeezed, gap * 0.7)
                         continue
+                    self.picker.restore(picked)
                 split = self._hyphenate(w, style, right + overflow - x - gap) if block.kind != doc.HEADING else None
                 if split:
                     head, tail = split
