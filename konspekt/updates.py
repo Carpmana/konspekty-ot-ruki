@@ -94,6 +94,31 @@ def can_self_update() -> bool:
     return True
 
 
+def in_temp(path: Path | None = None) -> bool:
+    """Запущена ли копия из временной папки. Так бывает, если открыть
+    Konspekt.exe прямо в архиве: Windows распаковывает его в %TEMP%, и при
+    следующем запуске из архива снова будет старая версия, сколько ни обновляй.
+    Наши папки обновления (konspekt-update-*) — не в счёт."""
+    path = Path(path or app_dir()).resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    try:
+        rel = path.relative_to(tmp)
+    except ValueError:
+        return False
+    return not (rel.parts and rel.parts[0].startswith("konspekt-update-"))
+
+
+def update_outcome(expected: str, expected_dir: str, current: str | None, here: Path | None = None) -> str:
+    """Что вышло из обновления, начатого в прошлый раз (до версии expected
+    в папке expected_dir): "ok" — встало; "failed" — в той же папке осталась
+    старая версия; "other_copy" — обновили одну копию, а запущена другая."""
+    if not is_newer(expected, current):
+        return "ok"
+    here = Path(here or app_dir()).resolve()
+    same = bool(expected_dir) and Path(expected_dir).resolve() == here
+    return "failed" if same or not expected_dir else "other_copy"
+
+
 class Cancelled(Exception):
     pass
 
