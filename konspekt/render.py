@@ -75,39 +75,61 @@ def _blend(page: np.ndarray, alpha: np.ndarray, x0: int, y0: int, color: np.ndar
     roi += color * a
 
 
-def normalized_image(profile: Profile, sample, hd: bool = False) -> tuple[np.ndarray, int]:
+def normalized_image(profile: Profile, sample, hd: bool = False, weight: float = 1.0) -> tuple[np.ndarray, int]:
     """Образец с толщиной линии, приведённой к общей для профиля, и во
     сколько раз он плотнее 300 dpi.
 
     Образцы с разных страниц скана выходят то тоньше, то жирнее (свет,
     резкость). Настоящая ручка пишет одной толщиной, поэтому слишком жирные
-    образцы слегка «сужаем», а слишком тонкие — утолщаем.
+    образцы слегка «сужаем», а слишком тонкие — утолщаем. Общая толщина —
+    как на скане; weight плавно делает её тоньше (<1) или толще (>1).
 
     hd: взять образец в 600 dpi — для печати и PDF. Предпросмотр мелкий,
     ему хватает 300 dpi, и так быстрее."""
-    key = f"{sample.id}:norm:{int(hd)}"
+    weight = _weight(weight)
+    key = f"{sample.id}:norm:{int(hd)}:{weight}"
     if key not in profile._cache:
         a, f = profile.print_image(sample) if hd else (profile.image(sample), 1)
-        target = mm_to_px(profile.params.stroke_mm, SAMPLE_DPI)
-        k = (sample.stroke_px - target) / 2.0 * f if sample.stroke_px > 0 else 0.0
-        r = int(round(abs(k)))
-        if r >= 1:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-            a = cv2.erode(a, kernel) if k > 0 else cv2.dilate(a, kernel)
-        profile._cache[key] = (a, f)
+        target = mm_to_px(profile.params.stroke_mm, SAMPLE_DPI) * weight
+        have = sample.stroke_px if sample.stroke_px > 0 else target / weight
+        profile._cache[key] = (offset_stroke(a, (target - have) / 2.0 * f), f)
     return profile._cache[key]
 
 
-def glyph_contours(profile: Profile, sample, smoothness: float = 0.5, fallback: bool = False) -> list[np.ndarray]:
+def _weight(weight: float) -> float:
+    return round(float(np.clip(weight, 0.3, 3.0)), 2)
+
+
+def offset_stroke(a: np.ndarray, d: float) -> np.ndarray:
+    """Сдвигает край линии на d пикселей наружу (d < 0 — внутрь), с долями
+    пикселя: толщина меняется плавно, а не ступеньками в целый пиксель.
+    Край остаётся сглаженным на один пиксель."""
+    if abs(d) < 0.05:
+        return a
+    ink = (a >= 0.5).astype(np.uint8)
+    if not ink.any():
+        return a
+    pad = int(np.ceil(max(d, 0.0))) + 2
+    ink = cv2.copyMakeBorder(ink, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    inside = cv2.distanceTransform(ink, cv2.DIST_L2, 5)
+    outside = cv2.distanceTransform(1 - ink, cv2.DIST_L2, 5)
+    signed = np.where(ink > 0, inside - 0.5, 0.5 - outside)  # >0 внутри, край — 0
+    out = np.clip(signed + d + 0.5, 0.0, 1.0).astype(np.float32)
+    return out[pad:-pad, pad:-pad]
+
+
+def glyph_contours(profile: Profile, sample, smoothness: float = 0.5, fallback: bool = False,
+                   weight: float = 1.0) -> list[np.ndarray]:
     """Гладкие контуры образца в пикселях 300 dpi (см. vector.trace).
     Обводим образец в 600 dpi с выровненной толщиной линии."""
     smoothness = round(float(np.clip(smoothness, 0.0, 1.0)), 2)
-    key = f"{sample.id}:vec:{smoothness}"
+    weight = _weight(weight)
+    key = f"{sample.id}:vec:{smoothness}:{weight}"
     if key not in profile._cache:
         if fallback:
             a, f = profile.image(sample), 1
         else:
-            a, f = normalized_image(profile, sample, hd=True)
+            a, f = normalized_image(profile, sample, hd=True, weight=weight)
         profile._cache[key] = trace(a, smoothness, f)
     return profile._cache[key]
 
@@ -124,7 +146,7 @@ def _glyph_transform(g: Glyph, s: Settings) -> tuple[np.ndarray, np.ndarray]:
 def _draw_glyph(page: np.ndarray, g: Glyph, profile: Profile, s: Settings, ink: np.ndarray) -> None:
     if s.solid_lines:
         lin, origin = _glyph_transform(g, s)
-        alpha, x0, y0 = fill(glyph_contours(profile, g.sample, s.smoothness, g.fallback), lin, origin)
+        alpha, x0, y0 = fill(glyph_contours(profile, g.sample, s.smoothness, g.fallback, s.weight), lin, origin)
         if g.fallback and s.highlight_missing:
             _blend(page, np.full_like(alpha, 0.6), x0, y0, MISSING_COLOR, 1.0)
         _blend(page, alpha, x0, y0, ink, g.opacity)
@@ -132,9 +154,15 @@ def _draw_glyph(page: np.ndarray, g: Glyph, profile: Profile, s: Settings, ink: 
     if g.fallback:
         src, f = profile.image(g.sample), 1
     else:
-        src, f = normalized_image(profile, g.sample, hd=s.dpi >= HD_MIN_DPI)
+        src, f = normalized_image(profile, g.sample, hd=s.dpi >= HD_MIN_DPI, weight=s.weight)
     lin, origin = _glyph_transform(g, s)
     lin = lin / f  # координаты образца в GlyphSample — в пикселях 300 dpi
+    k = math.sqrt(abs(float(np.linalg.det(lin))))
+    if k < 0.9:
+        # Сильное уменьшение одним warpAffine теряет тонкие линии (берёт
+        # пиксели через один): сначала честно уменьшаем по площади.
+        src = cv2.resize(src, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        lin = lin / k
     h, w = src.shape
     corners = np.array([[0, 0], [w, 0], [0, h], [w, h]], float) @ lin.T + origin
     x0, y0 = np.floor(corners.min(axis=0)).astype(int) - 1
@@ -171,7 +199,7 @@ def _draw_connector(page: np.ndarray, c, s: Settings, ink: np.ndarray) -> None:
     canvas = np.zeros((y1 - y0, x1 - x0), np.uint8)
     shift = 4  # субпиксельная точность
     poly = np.round((pts - [x0, y0]) * (1 << shift)).astype(np.int32)
-    width = max(1, int(round(c.width_mm * ppm)))
+    width = max(1, int(round(c.width_mm * s.weight * ppm)))
     cv2.polylines(canvas, [poly], False, 255, width, cv2.LINE_AA, shift)
     _blend(page, _stroke_edge(canvas, s), int(x0), int(y0), ink, c.opacity)
 
@@ -184,7 +212,7 @@ def _draw_line(page: np.ndarray, ln, s: Settings, ink: np.ndarray) -> None:
     canvas = np.zeros((y1 - y0, x1 - x0), np.uint8)
     shift = 4
     poly = np.round((pts - [x0, y0]) * (1 << shift)).astype(np.int32)
-    width = max(1, int(round(ln.width_mm * ppm)))
+    width = max(1, int(round(ln.width_mm * s.weight * ppm)))
     cv2.polylines(canvas, [poly], False, 255, width, cv2.LINE_AA, shift)
     _blend(page, _stroke_edge(canvas, s), int(x0), int(y0), ink, ln.opacity)
 

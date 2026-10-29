@@ -80,7 +80,7 @@ def cmd_render(args) -> int:
     text = Path(args.text).read_text(encoding="utf-8-sig")
     s = lay.Settings(page=args.page, paper=args.paper, dpi=args.dpi, seed=args.seed,
                      neatness=args.neatness, x_height_mm=args.size, line_pitch_mm=args.pitch,
-                     highlight_missing=args.show_missing, smoothness=args.smooth,
+                     highlight_missing=args.show_missing, smoothness=args.smooth, weight=args.weight,
                      ink_color=INK_COLORS.get(args.ink))
     layout = lay.typeset(text, prof, s)
     images = render(layout, prof)
@@ -128,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--pitch", type=float, default=10.0, help="расстояние между строками, мм")
     g.add_argument("--show-missing", action="store_true", help="подсветить символы без образцов")
     g.add_argument("--smooth", type=float, default=0.5, help="гладкость линии: 0 как в скане, 1 ровно")
+    g.add_argument("--weight", type=float, default=1.0, help="толщина линии: 1 как на скане, 0.5 тоньше, 2 толще")
     g.add_argument("--ink", default="", choices=[k for k, _ in INKS], help="цвет ручки: black — чёрная")
     g.set_defaults(func=cmd_render)
 

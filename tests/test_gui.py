@@ -515,6 +515,15 @@ def test_smooth_slider_in_options(window):
     assert window.options().settings(100).smoothness == 0.8
 
 
+def test_weight_slider_in_options(window):
+    assert window.options().settings(100).weight == 1.0  # посередине — как на скане
+    window.weight_slider.setValue(10)
+    assert window.options().settings(100).weight == 2.0
+    window.weight_slider.setValue(-10)
+    assert abs(window.options().weight - 0.62) < 0.01
+    window.weight_slider.setValue(0)
+
+
 def test_black_ink_switch(window):
     assert window.options().settings(100).ink_color is None  # как в образцах
     window.ink_box.setCurrentIndex(window.ink_box.findData("black"))
@@ -526,7 +535,7 @@ def test_every_slider_has_help(window, monkeypatch):
     monkeypatch.setattr(gui.QMessageBox, "information", lambda parent, title, text: shown.append((title, text)))
     helps = [b for b in window.findChildren(QtWidgets.QToolButton) if b.property("help_for")]
     sliders = window.findChildren(QtWidgets.QSlider)
-    assert len(helps) == len(sliders) == 5
+    assert len(helps) == len(sliders) == 6
     for b in helps:
         b.click()
     assert [t for t, _ in shown] == [b.property("help_for") for b in helps]
