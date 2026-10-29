@@ -187,3 +187,63 @@ def test_flood_drops_faint_smudge_and_fills_grain():
     assert a[50:71, 30:51].max() == 0  # пятно залито бумагой
     assert a[99, 80] > 0.9  # зерно залито чернилами
     assert a[a > 0.5].min() > 0.5 and np.mean(a[a > 0.04] > 0.9) > 0.6  # линия сплошная
+
+
+def test_belarusian_template_adds_to_profile(tmp_path, profile):
+    """Белорусский бланк — отдельная страница со своими метками; его сканы
+    добавляются к готовому профилю, ничего не стирая."""
+    import shutil
+
+    from PIL import Image
+
+    from konspekt.charset import BE_ONLY
+    from konspekt.layout import Settings, typeset
+    from konspekt.profile import Profile
+    from konspekt.synthetic import fill_template, photograph
+    from konspekt.template import all_pages, set_pages
+
+    from conftest import FONT
+
+    pages = set_pages("be")
+    assert len(pages) == 1 and pages[0][0].page == 10
+    assert len(all_pages()) == 12  # номера страниц бланков не пересекаются
+    p = tmp_path / "бел.jpg"
+    Image.fromarray(photograph(fill_template(FONT, seed=4, key="be")[0], seed=21)).save(p, quality=95)
+    rep = import_files([p])
+    assert [s.cell.request for s in rep.samples] == [c.request for c in pages[0]]
+
+    prof = Profile.load(shutil.copytree(profile.root, tmp_path / "Мой"))
+    before = len(prof.samples)
+    prof.add_extracted(rep.samples)
+    prof.save()
+    prof = Profile.load(prof.root)
+    assert len(prof.samples) == before + len(rep.samples)
+    assert all(prof.variants(c) for c in BE_ONLY)
+    assert prof.coverage()["белорусские"]["нет"] == ""
+    layout = typeset("Ўсе дзеці ішлі ў школу. Сям'я", prof, Settings(seed=1))
+    assert not layout.missing
+
+
+def test_english_template_roundtrip(tmp_path):
+    """Английский бланк — на метках после 50-й: словарь меток расширен,
+    а первые 50 совпадают со старым, так что старые бланки читаются."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from konspekt.synthetic import fill_template, photograph
+    from konspekt.template import ARUCO_DICT, set_pages
+
+    from conftest import FONT
+
+    old = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50).bytesList
+    assert np.array_equal(cv2.aruco.getPredefinedDictionary(ARUCO_DICT).bytesList[:50], old)
+    paths = []
+    for i, page in enumerate(fill_template(FONT, seed=5, key="en")):
+        p = tmp_path / f"англ_{i}.jpg"
+        Image.fromarray(photograph(page, seed=30 + i)).save(p, quality=95)
+        paths.append(p)
+    rep = import_files(paths)
+    pages = set_pages("en")
+    assert sorted(rep.pages_found) == [c[0].page for c in pages] == [12, 13]
+    assert [s.cell.request for s in rep.samples] == [c.request for cells in pages for c in cells]

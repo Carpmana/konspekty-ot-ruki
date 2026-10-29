@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from . import icons, service as sv
 from . import updates
-from .charset import DIGITS, PUNCT, RU_LOWER, RU_UPPER
+from .charset import BE_ONLY, DIGITS, EN_PUNCT, LAT_LOWER, LAT_UPPER, PUNCT, RU_LOWER, RU_UPPER
 from .layout import Settings as LayoutSettings, typeset
 from .profile import DRAWN_SOURCE, RAISE_LIMITS_MM, SCALE_LIMITS, GlyphSample, Profile
 from .render import render_page
@@ -947,7 +947,7 @@ class DrawDialog(QDialog):
         row.addWidget(QLabel("Буква или сочетание:"))
         self.text_box = QComboBox()
         self.text_box.setEditable(True)
-        self.text_box.addItems(list(RU_LOWER + RU_UPPER + DIGITS + PUNCT))
+        self.text_box.addItems(list(RU_LOWER + RU_UPPER + DIGITS + PUNCT + BE_ONLY + LAT_LOWER + LAT_UPPER + EN_PUNCT))
         self.text_box.setCurrentText(start or "а")
         row.addWidget(self.text_box, 1)
         self.count_label = QLabel(objectName="hint")
@@ -1045,6 +1045,14 @@ class DrawDialog(QDialog):
         self.canvas.clear()
         self._show_variants()
 
+
+TEMPLATE_HINTS = {
+    "extra": "Дополнительный бланк можно заполнять много раз: каждый скан добавляет новые варианты букв.",
+    "be": "Это одна страница только с буквами і, ў и апострофом, остальные буквы берутся из основного "
+          "бланка. Сканы импортируйте в тот же почерк: старые образцы останутся, новые добавятся.",
+    "en": "Здесь латиница (строчные и заглавные), знаки вроде & и @ и частые английские слова. Сканы "
+          "импортируйте в тот же почерк: старые образцы останутся, новые добавятся.",
+}
 
 WELCOME_STEPS = [
     ("Распечатайте бланк",
@@ -1664,6 +1672,8 @@ class MainWindow(QMainWindow):
         act(m, "Импорт сканов бланка…", self.import_scans, "Ctrl+I")
         act(m, "Сохранить основной бланк (PDF)…", lambda: self.save_template("main"))
         act(m, "Сохранить дополнительный бланк (PDF)…", lambda: self.save_template("extra"))
+        act(m, "Сохранить белорусский бланк (PDF)…", lambda: self.save_template("be"))
+        act(m, "Сохранить английский бланк (PDF)…", lambda: self.save_template("en"))
         act(m, "Что есть в профиле", self.show_coverage)
         act(m, "Редактор букв…", self.edit_samples, "Ctrl+B")
         act(m, "Нарисовать буквы…", self.draw_letters, "Ctrl+D")
@@ -1973,8 +1983,7 @@ class MainWindow(QMainWindow):
         if path:
             self._run(save_template_pdf, (path, key), lambda n: QMessageBox.information(
                 self, APP_NAME, f"Бланк «{title}» сохранён ({n} стр.). Распечатайте в реальном размере, "
-                                "заполните ручкой и импортируйте сканы. Дополнительный бланк можно "
-                                "заполнять много раз: каждый скан добавляет новые варианты букв."),
+                                "заполните ручкой и импортируйте сканы. " + TEMPLATE_HINTS.get(key, "")),
                       "Сохранение бланка…")
 
     def open_profiles_dir(self):
@@ -2246,7 +2255,11 @@ class MainWindow(QMainWindow):
         self.last_missing = missing
         if missing:
             self.missing_label.setText("Нет образцов для символов (взяты из запасного шрифта): "
-                                       + " ".join(sorted(missing)))
+                                       + " ".join(sorted(missing))
+                                       + (". Для белорусских букв: Почерк → Сохранить белорусский бланк."
+                                          if missing & set(BE_ONLY) else "")
+                                       + (". Для латиницы: Почерк → Сохранить английский бланк."
+                                          if missing & set(LAT_LOWER + LAT_UPPER + EN_PUNCT) else ""))
         self.missing_label.setVisible(bool(missing))
 
     # ---------- экспорт и печать ----------
