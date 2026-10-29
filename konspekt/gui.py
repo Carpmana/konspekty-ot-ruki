@@ -1138,6 +1138,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 820)
         self.qs = settings or QSettings("Konspekt", "Konspekt")
+        self._update_failed = False  # прошлое обновление не встало: не предлагаем его снова при запуске
         self.profiles_dir = Path(profiles_dir or self.qs.value("profiles_dir", "") or sv.default_profiles_dir())
         self.pool = QThreadPool.globalInstance()
         self.profile: Profile | None = None
@@ -2223,7 +2224,7 @@ class MainWindow(QMainWindow):
         self.statusBar().clearMessage()
         current = updates.current_version()
         newer = updates.is_newer(rel.version, current)
-        if silent and (not newer or self.qs.value("skip_version", "") == rel.version):
+        if silent and (not newer or self._update_failed or self.qs.value("skip_version", "") == rel.version):
             return
         if current and not newer:
             QMessageBox.information(self, APP_NAME, f"У вас последняя версия ({current}).")
@@ -2246,10 +2247,56 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is skip:
             self.qs.setValue("skip_version", rel.version)
         elif box.clickedButton() is update:
-            if rel.download_url and updates.can_self_update():
+            if current and updates.in_temp():
+                self._explain_temp_copy()
+            elif rel.download_url and updates.can_self_update():
                 self._download_update(rel)
             else:
                 QDesktopServices.openUrl(QUrl(rel.page_url))
+
+    def _explain_temp_copy(self):
+        QMessageBox.information(
+            self, "Обновление",
+            "Программа запущена прямо из архива, без распаковки. Такую копию обновить нельзя: "
+            "при следующем запуске из архива Windows снова достанет из него старую версию.<br><br>"
+            "Распакуйте архив Konspekt-windows.zip (правой кнопкой → «Извлечь все…») и запускайте "
+            "Konspekt.exe из распакованной папки. Профили почерков при этом сохранятся.")
+
+    def check_update_result(self) -> None:
+        """Обновление, начатое в прошлый раз, могло не встать: программа снова
+        запущена из архива, ярлык ведёт на другую копию или старую папку не
+        удалось заменить. Тогда не предлагаем ту же версию по кругу, а говорим,
+        в чём дело."""
+        expected = str(self.qs.value("update_pending", "") or "")
+        if not expected:
+            return
+        expected_dir = str(self.qs.value("update_dir", "") or "")
+        self.qs.remove("update_pending")
+        self.qs.remove("update_dir")
+        current = updates.current_version()
+        outcome = updates.update_outcome(expected, expected_dir, current)
+        if outcome == "ok":
+            self.statusBar().showMessage(f"Программа обновлена до версии {current}.", 8000)
+            return
+        self._update_failed = True
+        here = updates.app_dir()
+        if updates.in_temp():
+            text = ("Программа снова запущена прямо из архива, поэтому открылась старая версия "
+                    f"{current}, а не {expected}.<br><br>Распакуйте архив Konspekt-windows.zip "
+                    "(правой кнопкой → «Извлечь все…») и запускайте Konspekt.exe из распакованной папки.")
+        elif outcome == "other_copy":
+            text = (f"Версия {expected} установлена в папку<br><b>{expected_dir}</b>,<br>"
+                    f"а сейчас запущена другая, старая копия ({current}) из папки<br><b>{here}</b>.<br><br>"
+                    "Запускайте Konspekt.exe из первой папки (или поправьте ярлык), "
+                    "а старую копию можно удалить. Профили почерков общие, они не пропадут.")
+        else:
+            text = (f"Не получилось обновиться до версии {expected}: осталась версия {current}.<br><br>"
+                    "Закройте все окна программы и папку с ней в Проводнике и попробуйте ещё раз "
+                    "(«Справка → Проверить обновления»). Если снова не выйдет, скачайте новую версию "
+                    f'<a href="{updates.RELEASES_PAGE}">со страницы программы</a> и распакуйте вместо старой.')
+        box = QMessageBox(QMessageBox.Warning, "Обновление не установилось", text, QMessageBox.Ok, self)
+        box.setTextFormat(Qt.RichText)
+        box.exec()
 
     def _download_update(self, rel: updates.Release):
         dlg = QProgressDialog(f"Скачиваю версию {rel.version}…", "Отмена", 0, 1000, self)
@@ -2285,6 +2332,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Обновление", "Новая версия скачана. Программа закроется "
                                     "и сразу откроется уже обновлённой.")
             self._save_settings()
+            # после перезапуска сверим: встала ли новая версия (см. check_update_result)
+            self.qs.setValue("update_pending", rel.version)
+            self.qs.setValue("update_dir", str(updates.app_dir()))
+            self.qs.sync()
             try:
                 updates.start_finish(new_dir)
             except OSError as e:
@@ -2389,6 +2440,7 @@ def main(argv: list[str] | None = None) -> int:
         QTimer.singleShot(400, w.show_welcome)
     if not w.blank and updates.current_version():
         updates.cleanup_leftovers()
+        QTimer.singleShot(800, w.check_update_result)
         QTimer.singleShot(1500, w.check_updates)
     return app.exec()
 

@@ -434,6 +434,52 @@ def test_update_check(app, window, monkeypatch):
     assert len(shown) == 1
 
 
+def test_failed_update_is_explained_not_offered_again(app, window, monkeypatch, tmp_path):
+    """Обновились до 0.2.40, а после перезапуска снова старая 0.2.38 (запуск
+    из архива, другая копия по ярлыку): объясняем, а не предлагаем по кругу."""
+    monkeypatch.setattr(gui.updates, "current_version", lambda: "0.2.38")
+    monkeypatch.setattr(gui.updates, "app_dir", lambda: tmp_path / "старая")
+    monkeypatch.setattr(gui.updates, "in_temp", lambda path=None: False)
+    window.qs.setValue("update_pending", "0.2.40")
+    window.qs.setValue("update_dir", str(tmp_path / "новая"))
+    shown = []
+    monkeypatch.setattr(gui.QMessageBox, "exec", lambda box: shown.append(box.text()) or 0)
+    window.check_update_result()
+    assert len(shown) == 1 and "другая" in shown[0] and "новая" in shown[0]
+    assert not window.qs.value("update_pending", "")
+
+    rel = gui.updates.Release("0.2.40", "", "https://example/rel", "", 0)
+    monkeypatch.setattr(gui.updates, "fetch_latest", lambda: rel)
+    window.check_updates()  # проверка при запуске молчит
+    wait_idle(app, window)
+    assert len(shown) == 1
+
+
+def test_successful_update_is_quiet(app, window, monkeypatch):
+    monkeypatch.setattr(gui.updates, "current_version", lambda: "0.2.40")
+    window.qs.setValue("update_pending", "0.2.40")
+    window.qs.setValue("update_dir", str(gui.updates.app_dir()))
+    shown = []
+    monkeypatch.setattr(gui.QMessageBox, "exec", lambda box: shown.append(box.text()) or 0)
+    window.check_update_result()
+    assert shown == [] and "0.2.40" in window.statusBar().currentMessage()
+
+
+def test_update_from_archive_copy_is_refused(app, window, monkeypatch):
+    rel = gui.updates.Release("0.2.40", "", "https://example/rel", "https://example/k.zip", 5)
+    monkeypatch.setattr(gui.updates, "fetch_latest", lambda: rel)
+    monkeypatch.setattr(gui.updates, "current_version", lambda: "0.2.38")
+    monkeypatch.setattr(gui.updates, "in_temp", lambda path=None: True)
+    monkeypatch.setattr(gui.QMessageBox, "clickedButton", lambda box: box.buttons()[0])
+    monkeypatch.setattr(gui.QMessageBox, "exec", lambda box: 0)
+    infos, downloads = [], []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: infos.append(a[2]))
+    monkeypatch.setattr(window, "_download_update", downloads.append)
+    window.check_updates()
+    wait_idle(app, window)
+    assert downloads == [] and infos and "архив" in infos[0]
+
+
 def test_update_check_offline_is_silent(app, window, monkeypatch):
     def offline():
         raise OSError("нет сети")
