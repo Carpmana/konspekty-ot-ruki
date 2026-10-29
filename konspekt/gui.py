@@ -411,9 +411,10 @@ SLIDER_HELP = {
     "Гладкость линии": (
         "Шариковая ручка пишет с пропусками (шарик не провернулся) и зернистой линией, и сканер это "
         "сохраняет.\n\n"
-        "Правее — пропуски закрываются, штрих становится ровным и сплошным, как у гелевой ручки. "
-        "Толщина линии не меняется.\n"
-        "0 — буквы точно как в скане. Ваши образцы при этом не меняются, только то, как они печатаются."),
+        "Поэтому буквы обводятся гладким контуром и печатаются сплошной линией с чистым краем, как "
+        "шрифт. Правее — изгибы плавнее. Толщина линии не меняется.\n"
+        "0 — буквы точно как в скане, с зерном ручки. Ваши образцы при этом не меняются, только то, "
+        "как они печатаются."),
     "Размер": (
         "Во сколько раз крупнее или мельче писать эту букву в тексте. 100% — как в образцах.\n\n"
         "Пригодится, если какая-то буква в бланке вышла заметно больше или меньше остальных. "
@@ -1219,6 +1220,11 @@ class MainWindow(QMainWindow):
         row2.addWidget(samples, 1)
         row2.addWidget(draw, 1)
         sl.addLayout(row2)
+        self.ink_box = QComboBox()
+        for key, title in sv.INKS:
+            self.ink_box.addItem(title, key)
+        self.ink_box.setToolTip("Каким цветом печатать почерк, чем бы ни были написаны образцы")
+        field("Цвет ручки", self.ink_box)
 
         sl = section("Бумага", "paper", view_side_l)
         self.page_box = QComboBox()
@@ -1279,8 +1285,8 @@ class MainWindow(QMainWindow):
         sl.addLayout(eends)
         self.smooth_slider = QSlider(Qt.Horizontal)
         self.smooth_slider.setRange(0, 10)
-        self.smooth_slider.setToolTip("Шариковая ручка оставляет пропуски и зернистую линию. Чем правее, тем "
-                                      "ровнее и сплошнее штрих. 0 — точно как в скане")
+        self.smooth_slider.setToolTip("Буквы печатаются сплошной гладкой линией, как шрифт. Чем правее, тем "
+                                      "плавнее изгибы. 0 — точно как в скане, с зерном ручки")
         sl.addLayout(slider_title("Гладкость линии"))
         sl.addWidget(self.smooth_slider)
         smends = QHBoxLayout()
@@ -1516,7 +1522,7 @@ class MainWindow(QMainWindow):
         self.go_step(0, animate=False)
         self.setCentralWidget(body)
 
-        for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
+        for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged, self.ink_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
                     self.edge_slider.valueChanged, self.smooth_slider.valueChanged,
@@ -1645,6 +1651,7 @@ class MainWindow(QMainWindow):
         self.fix_slider.setValue(int(q.value("corrections10", 0)))
         self.edge_slider.setValue(int(q.value("live_edge10", 5)))
         self.smooth_slider.setValue(int(q.value("smooth10", 5)))
+        self.ink_box.setCurrentIndex(max(0, self.ink_box.findData(q.value("ink", ""))))
         self.size_spin.setValue(float(q.value("size_mm", 0.0)))
         self.pitch_spin.setValue(float(q.value("pitch_mm", 10.0)))
         self.real_paper.setChecked(q.value("real_paper", "false") in (True, "true"))
@@ -1679,6 +1686,7 @@ class MainWindow(QMainWindow):
         q.setValue("corrections10", self.fix_slider.value())
         q.setValue("live_edge10", self.edge_slider.value())
         q.setValue("smooth10", self.smooth_slider.value())
+        q.setValue("ink", self.ink_box.currentData())
         q.setValue("size_mm", self.size_spin.value())
         q.setValue("pitch_mm", self.pitch_spin.value())
         q.setValue("profile", self.profile_box.currentText())
@@ -1698,7 +1706,8 @@ class MainWindow(QMainWindow):
                           offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
                           nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
                           corrections=self.fix_slider.value() / 200, live_edge=self.edge_slider.value() / 5,
-                          flip_back=self.flip_back.isChecked(), smoothness=self.smooth_slider.value() / 10)
+                          flip_back=self.flip_back.isChecked(), smoothness=self.smooth_slider.value() / 10,
+                          ink=self.ink_box.currentData())
 
     # ---------- профили ----------
 

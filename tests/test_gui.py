@@ -469,6 +469,12 @@ def test_smooth_slider_in_options(window):
     assert window.options().settings(100).smoothness == 0.8
 
 
+def test_black_ink_switch(window):
+    assert window.options().settings(100).ink_color is None  # как в образцах
+    window.ink_box.setCurrentIndex(window.ink_box.findData("black"))
+    assert window.options().settings(100).ink_color == sv.INK_COLORS["black"]
+
+
 def test_every_slider_has_help(window, monkeypatch):
     shown = []
     monkeypatch.setattr(gui.QMessageBox, "information", lambda parent, title, text: shown.append((title, text)))

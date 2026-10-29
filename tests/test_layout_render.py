@@ -163,19 +163,37 @@ def test_letter_size_editor_changes_layout(profile, tmp_path):
     assert g1.y < g0.y - 0.8  # выше строки
 
 
-def test_smooth_stroke_fills_ballpoint_gaps():
-    from konspekt.render import smooth_stroke
+def test_trace_makes_solid_smooth_strokes():
+    from konspekt.vector import fill, trace
 
+    # Штрих шариковой ручки: пропуск, где шарик не провернулся, и зерно.
     a = np.zeros((40, 120), np.float32)
     a[18:23, 10:110] = 0.9
-    a[18:23, 30:32] = 0.0  # шарик не провернулся
-    a[18:23, 60:110:3] = 0.35  # зерно
-    assert smooth_stroke(a, 0.0) is a
-    s = smooth_stroke(a, 1.0)
-    assert s[20, 31] > 0.6 and s[20, 63] > 0.6
-    # толщина не растёт заметно
-    assert (s > 0.5).sum() <= 1.3 * (a > 0.5).sum() + 100
-    assert s[5, 60] < 0.05
+    a[18:23, 30:32] = 0.0
+    a[18:23, 60:110:3] = 0.35
+    contours = trace(a, 0.5)
+    assert len(contours) == 1  # одна цельная линия, без дыр и обрывков
+    alpha, x0, y0 = fill(contours, np.eye(2), np.zeros(2))
+    assert x0 <= 10 and y0 <= 18
+    assert alpha[20 - y0, 31 - x0] > 0.95 and alpha[20 - y0, 63 - x0] > 0.95
+    # толщина как была: 5 пикселей
+    assert 4 <= (alpha[:, 50 - x0] > 0.5).sum() <= 7
+    # внутри линии сплошная заливка, без светлых точек
+    assert alpha[19 - y0:22 - y0, 15 - x0:105 - x0].min() > 0.95
+
+
+def test_trace_keeps_holes_and_dots():
+    import cv2
+
+    from konspekt.vector import fill, trace
+
+    a = np.zeros((80, 80), np.float32)
+    cv2.circle(a, (40, 45), 18, 1.0, 4)  # «о»
+    cv2.circle(a, (40, 12), 3, 1.0, -1)  # точка над буквой
+    alpha, x0, y0 = fill(trace(a, 0.5), np.eye(2), np.zeros(2))
+    assert alpha[45 - y0, 40 - x0] < 0.05  # дырка в «о» осталась
+    assert alpha[12 - y0, 40 - x0] > 0.9  # точка не пропала
+    assert alpha[45 - y0, 22 - x0] > 0.9
 
 
 def test_smoothness_changes_ink(profile):
@@ -187,6 +205,15 @@ def test_smoothness_changes_ink(profile):
 
     imgs = [draw(v) for v in (0.0, 1.0)]
     assert np.abs(imgs[0] - imgs[1]).mean() > 0.01
+
+
+def test_black_ink(profile):
+    s = Settings(dpi=100, paper_texture=False, paper="blank", ink_color=(24, 24, 28))
+    im = np.asarray(render_page(typeset("Ощущение", profile, s).pages[0], profile, s), np.float32)
+    ink = im[im.sum(axis=2) < 300]
+    assert len(ink) > 50
+    # чернила серые, без синевы
+    assert np.abs(ink[:, 2] - ink[:, 0]).mean() < 8
 
 
 def test_hd_print_matches_preview(profile):

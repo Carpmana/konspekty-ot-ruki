@@ -14,6 +14,7 @@ from . import layout as lay
 from .extract import ImportErrorRu, import_files
 from .profile import Profile, safe_folder_name
 from .render import render, save_pdf, save_pngs
+from .service import INK_COLORS, INKS
 from .template import TEMPLATE_SETS, save_template_pdf
 
 
@@ -79,7 +80,8 @@ def cmd_render(args) -> int:
     text = Path(args.text).read_text(encoding="utf-8-sig")
     s = lay.Settings(page=args.page, paper=args.paper, dpi=args.dpi, seed=args.seed,
                      neatness=args.neatness, x_height_mm=args.size, line_pitch_mm=args.pitch,
-                     highlight_missing=args.show_missing, smoothness=args.smooth)
+                     highlight_missing=args.show_missing, smoothness=args.smooth,
+                     ink_color=INK_COLORS.get(args.ink))
     layout = lay.typeset(text, prof, s)
     images = render(layout, prof)
     out = Path(args.out)
@@ -126,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--pitch", type=float, default=10.0, help="расстояние между строками, мм")
     g.add_argument("--show-missing", action="store_true", help="подсветить символы без образцов")
     g.add_argument("--smooth", type=float, default=0.5, help="гладкость линии: 0 как в скане, 1 ровно")
+    g.add_argument("--ink", default="", choices=[k for k, _ in INKS], help="цвет ручки: black — чёрная")
     g.set_defaults(func=cmd_render)
 
     args = ap.parse_args(argv)
