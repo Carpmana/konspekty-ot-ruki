@@ -561,3 +561,101 @@ def test_welcome_until_own_profile(app, tmp_path, monkeypatch):
     sv.Profile.create(tmp_path / "profiles" / "Мой", "Мой")
     assert not w.should_welcome()
     w.close()
+
+
+def test_view_templates_save_apply_delete(app, window, monkeypatch):
+    answers = []
+    monkeypatch.setattr(gui.QMessageBox, "question", lambda *a, **k: answers.pop(0))
+    window.paper_box.setCurrentIndex(window.paper_box.findData("lines"))
+    window.weight_slider.setValue(4)
+    window.ink_box.setCurrentIndex(window.ink_box.findData("black"))
+    window.size_spin.setValue(3.5)
+    assert window.save_view_template("Чёрная линейка")
+    assert window.tpl_box.currentText() == "Чёрная линейка" and window.del_tpl.isEnabled()
+
+    window.paper_box.setCurrentIndex(window.paper_box.findData("grid"))
+    assert window.tpl_box.currentIndex() == -1  # настройки уже не как в шаблоне
+    window.weight_slider.setValue(-6)
+    window.page_box.setCurrentIndex(window.page_box.findData("A4"))
+    assert window.save_view_template("Клетка A4")
+
+    window.tpl_box.setCurrentIndex(window.tpl_box.findText("Чёрная линейка"))
+    window.tpl_box.activated.emit(window.tpl_box.currentIndex())
+    o = window.options()
+    assert (o.paper, o.page, o.ink, o.size_mm) == ("lines", "notebook", "black", 3.5)
+    assert window.weight_slider.value() == 4
+    assert window.tpl_box.currentText() == "Чёрная линейка"
+
+    window.size_spin.setValue(4.0)  # перезаписать: «нет» — шаблон прежний, «да» — новый
+    answers[:] = [gui.QMessageBox.No]
+    assert not window.save_view_template("Чёрная линейка")
+    assert window.view_templates()["Чёрная линейка"]["size_mm"] == 3.5
+    answers[:] = [gui.QMessageBox.Yes]
+    assert window.save_view_template("Чёрная линейка")
+    assert window.view_templates()["Чёрная линейка"]["size_mm"] == 4.0
+
+    answers[:] = [gui.QMessageBox.Yes]
+    assert window.delete_view_template("Клетка A4")
+    assert list(window.view_templates()) == ["Чёрная линейка"]
+    assert [window.tpl_box.itemText(i) for i in range(window.tpl_box.count())] == ["Чёрная линейка"]
+    assert window.size_spin.value() == 4.0  # удаление шаблона не меняет вид
+
+
+def test_view_template_remembered(app, profile, tmp_path):
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(profile.root.parent, qs)
+    w.weight_slider.setValue(5)
+    w.save_view_template("Мой вид")
+    w.close()
+    w2 = gui.MainWindow(profile.root.parent, qs)
+    assert w2.tpl_box.currentText() == "Мой вид" and w2.weight_slider.value() == 5
+    w2.close()
+
+
+def test_delete_profile(app, tmp_path, monkeypatch):
+    root = tmp_path / "profiles"
+    sv.Profile.create(root / sv.DEMO_NAME, sv.DEMO_NAME)
+    sv.Profile.create(root / "Мой почерк", "Мой почерк")
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(root, qs)
+    monkeypatch.setattr(gui, "_move_to_trash", lambda p: False)
+    asked = []
+    monkeypatch.setattr(w, "confirm_delete_profile", lambda name, path: asked.append(name) or False)
+    w.profile_box.setCurrentIndex(w.profile_box.findText("Мой почерк"))
+    assert not w.delete_profile()  # отказ: ничего не тронуто
+    assert (root / "Мой почерк" / "profile.json").exists()
+
+    monkeypatch.setattr(w, "confirm_delete_profile", lambda name, path: asked.append(name) or True)
+    shown = []
+    monkeypatch.setattr(gui.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    w.profile_box.setCurrentIndex(w.profile_box.findText(sv.DEMO_NAME))
+    assert w.delete_profile()
+    assert [w.profile_box.itemText(i) for i in range(w.profile_box.count())] == ["Мой почерк"]
+    assert w.profile is not None and w.profile.name == "Мой почерк"
+    assert asked == ["Мой почерк", sv.DEMO_NAME]
+    assert (sv.removed_profiles_dir(root) / sv.DEMO_NAME / "profile.json").exists()
+    assert "перенесена" in shown[-1]
+    w.close()
+
+
+def test_delete_own_profile_needs_checkbox(app, tmp_path, monkeypatch):
+    root = tmp_path / "profiles"
+    sv.Profile.create(root / "Мой почерк", "Мой почерк")
+    qs = QtCore.QSettings(str(tmp_path / "s.ini"), QtCore.QSettings.IniFormat)
+    w = gui.MainWindow(root, qs)
+    seen = {}
+
+    def fake_exec(box):
+        delete = next(b for b in box.buttons() if b.text() == "Удалить")
+        seen["disabled"] = not delete.isEnabled()
+        seen["text"] = box.informativeText()
+        box.checkBox().setChecked(True)
+        seen["enabled"] = delete.isEnabled()
+        delete.click()
+        return 0
+
+    monkeypatch.setattr(gui.QMessageBox, "exec", fake_exec)
+    assert w.confirm_delete_profile("Мой почерк", root / "Мой почерк")
+    assert seen["disabled"] and seen["enabled"]
+    assert "единственный" in seen["text"] and "Корзину" in seen["text"]
+    w.close()

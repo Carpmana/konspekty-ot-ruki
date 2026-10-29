@@ -91,6 +91,67 @@ def profile_dir_for(profiles_dir: str | Path, name: str) -> Path:
     return Path(profiles_dir) / safe_folder_name(name)
 
 
+def removed_profiles_dir(profiles_dir: str | Path) -> Path:
+    """Куда уходит удалённый почерк, если Корзина недоступна: рядом с папкой
+    профилей, а не внутри неё, чтобы он не появлялся в списке."""
+    root = Path(profiles_dir)
+    return root.parent / f"{root.name} (удалённые)"
+
+
+def delete_profile(profiles_dir: str | Path, path: str | Path, trash=None) -> Path | None:
+    """Убирает папку профиля: в Корзину (trash(путь) -> bool), а если не
+    вышло — переносит в removed_profiles_dir. Насовсем ничего не стирается.
+
+    Возвращает, куда перенесена папка (None — в Корзину). Трогает только
+    папку профиля внутри profiles_dir, иначе ValueError."""
+    import shutil
+    import time
+
+    root = Path(profiles_dir).resolve()
+    d = Path(path).resolve()
+    if d.parent != root or not (d / PROFILE_FILE).exists():
+        raise ValueError(f"Это не папка почерка в {root}: {d}")
+    if trash is not None:
+        try:
+            if trash(str(d)) and not d.exists():
+                return None
+        except Exception:
+            pass
+    dest_root = removed_profiles_dir(root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    dest = dest_root / d.name
+    if dest.exists():
+        dest = dest_root / f"{d.name} {time.strftime('%Y-%m-%d %H-%M-%S')}"
+    shutil.move(str(d), str(dest))
+    return dest
+
+
+# что входит в шаблон вида: значения элементов окна, как они хранятся в настройках
+VIEW_TEMPLATE_KEYS = ("page", "paper", "margins", "ink", "neatness10", "tiredness10", "corrections10",
+                      "live_edge10", "smooth10", "weight10", "size_mm", "pitch_mm")
+
+
+def load_view_templates(raw) -> dict[str, dict]:
+    """Шаблоны вида из настроек (строка JSON). Испорченная строка — пустой список,
+    лишние ключи отбрасываются."""
+    import json
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(name): {k: v for k, v in vals.items() if k in VIEW_TEMPLATE_KEYS}
+            for name, vals in data.items() if isinstance(vals, dict) and str(name).strip()}
+
+
+def dump_view_templates(templates: dict[str, dict]) -> str:
+    import json
+
+    return json.dumps(templates, ensure_ascii=False, sort_keys=True)
+
+
 @dataclass
 class ImportResult:
     profile_dir: Path
