@@ -1,6 +1,8 @@
 """Отрисовка свёрстанных страниц: бумага, чернила, соединения, экспорт."""
 
+import io
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -17,14 +19,15 @@ MARGIN_COLOR = np.array([226, 104, 118], np.float32)
 PAPER_COLOR = np.array([250, 250, 246], np.float32)
 MISSING_COLOR = np.array([255, 243, 170], np.float32)
 HD_MIN_DPI = 200  # с этой плотности страницы буквы берутся в 600 dpi (PDF, печать)
+WHITE = np.array([255, 255, 255], np.float32)
 
 
 def _paper(s: Settings, rng: np.random.Generator) -> np.ndarray:
     W, H = s.page_mm
     w, h = int(round(mm_to_px(W, s.dpi))), int(round(mm_to_px(H, s.dpi)))
     page = np.empty((h, w, 3), np.float32)
-    page[:] = PAPER_COLOR
-    if s.paper_texture:
+    page[:] = WHITE if s.solid_print else PAPER_COLOR
+    if s.paper_texture and not s.solid_print:
         low = cv2.resize(rng.normal(0, 1, (12, 9)).astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
         low *= 2.5
         page += low[..., None]
@@ -190,15 +193,48 @@ def render_page(page: Page, profile: Profile, s: Settings, index: int = 0) -> Im
     rng = np.random.default_rng((s.seed, index))
     canvas = _paper(s, rng)
     base_ink = np.array(s.ink_color or profile.params.ink_color, np.float32)
-    for c in page.connectors:
-        _draw_connector(canvas, c, s, base_ink)
-    for ln in page.lines:
-        _draw_line(canvas, ln, s, base_ink)
-    for g in page.glyphs:
-        ink = np.clip(base_ink + rng.normal(0, 4, 3), 0, 255).astype(np.float32)
-        _draw_glyph(canvas, g, profile, s, ink)
+    if s.solid_print:
+        _draw_solid(canvas, page, profile, s, print_ink(base_ink))
+    else:
+        for c in page.connectors:
+            _draw_connector(canvas, c, s, base_ink)
+        for ln in page.lines:
+            _draw_line(canvas, ln, s, base_ink)
+        for g in page.glyphs:
+            ink = np.clip(base_ink + rng.normal(0, 4, 3), 0, 255).astype(np.float32)
+            _draw_glyph(canvas, g, profile, s, ink)
     np.clip(canvas, 0, 255, out=canvas)  # на месте: при печати страница большая
     return Image.fromarray(canvas.astype(np.uint8), "RGB")
+
+
+def print_ink(ink: np.ndarray) -> np.ndarray:
+    """Цвет чернил для принтера. Почти чёрный становится чистым чёрным:
+    его принтер кладёт сплошным слоем, а тёмно-серый рисует растром из
+    точек."""
+    return np.zeros(3, np.float32) if ink.max() < 64 else ink
+
+
+def _draw_solid(canvas: np.ndarray, page: Page, profile: Profile, s: Settings, ink: np.ndarray) -> None:
+    """Чернила для принтера: каждый пиксель либо бумага, либо чернила в
+    полную силу.
+
+    Принтер не умеет печатать серый или полупрозрачный цвет: он заменяет
+    его растром — частыми точками краски с просветами. На экране буквы с
+    прозрачностью 0.93 и мягким краем выглядят живыми, а на бумаге
+    получаются в крапинку, с пыльной каймой. Поэтому здесь сначала
+    собирается, где на странице есть чернила, и по порогу половины
+    закрашивается одним цветом. При 400 dpi ступенька края — 0.06 мм,
+    глазом её не видно."""
+    cover = np.zeros(canvas.shape[:2] + (1,), np.float32)
+    one = np.ones(1, np.float32)
+    ps = replace(s, highlight_missing=False)
+    for c in page.connectors:
+        _draw_connector(cover, replace(c, opacity=1.0), ps, one)
+    for ln in page.lines:
+        _draw_line(cover, replace(ln, opacity=1.0), ps, one)
+    for g in page.glyphs:
+        _draw_glyph(cover, replace(g, opacity=1.0), profile, ps, one)
+    canvas[cover[..., 0] >= 0.5] = ink
 
 
 def render(layout: Layout, profile: Profile) -> list[Image.Image]:
@@ -206,9 +242,20 @@ def render(layout: Layout, profile: Profile) -> list[Image.Image]:
 
 
 def save_pdf(images: list[Image.Image], path: str | Path, dpi: int) -> None:
+    """Страницы в PDF без потерь (PNG внутри). Pillow кладёт картинки в PDF
+    как JPEG: вокруг букв появлялся «снег» из серых точек, и принтер честно
+    печатал его вкраплениями."""
+    import pymupdf
+
     if not images:
         raise ValueError("Нет страниц для сохранения")
-    images[0].save(str(path), "PDF", resolution=dpi, save_all=True, append_images=images[1:])
+    with pymupdf.open() as doc:
+        for im in images:
+            page = doc.new_page(width=im.width * 72.0 / dpi, height=im.height * 72.0 / dpi)
+            buf = io.BytesIO()
+            im.save(buf, "PNG", optimize=False, compress_level=6)
+            page.insert_image(page.rect, stream=buf.getvalue())
+        doc.save(str(path), deflate=True)
 
 
 def save_pngs(images: list[Image.Image], stem: str | Path) -> list[Path]:

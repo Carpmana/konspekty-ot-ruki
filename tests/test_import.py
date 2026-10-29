@@ -174,3 +174,16 @@ def test_legacy_sample_upscaled_without_specks():
     assert hd.shape == (a.shape[0] * HD, a.shape[1] * HD)
     assert hd[115 * HD:126 * HD, 35 * HD:46 * HD].max() == 0
     assert hd.max() > 0.9
+
+
+def test_flood_drops_faint_smudge_and_fills_grain():
+    import cv2
+
+    cell = np.full((200, 160, 3), 250, np.uint8)
+    cv2.line(cell, (40, 140), (120, 60), (40, 50, 140), 5)
+    cell[98:101, 79:82] = 200  # светлое зерно внутри штриха
+    cv2.circle(cell, (40, 60), 6, (215, 215, 225), -1)  # бледное пятно рядом
+    a = extract_ink(cell, text="л")
+    assert a[50:71, 30:51].max() == 0  # пятно залито бумагой
+    assert a[99, 80] > 0.9  # зерно залито чернилами
+    assert a[a > 0.5].min() > 0.5 and np.mean(a[a > 0.04] > 0.9) > 0.6  # линия сплошная

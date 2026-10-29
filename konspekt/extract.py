@@ -35,6 +35,13 @@ LONE_SPECK_MM = 0.8    # компактная точка не крупнее э�
 LONE_GAP_MM = 0.5      # обрывки штриха (ручка не прописала) лежат ближе
 # Символы, у которых есть отдельные точки и чёрточки: у них точку не трогаем.
 DETACHED_MARKS = set("ёйЁЙ!?:;.,іїij%…\"'«»÷")
+# Заливка (см. flood_ink): доли от плотности ручки в клетке.
+FLOOD_TOL = 0.5        # светлее — бумага (край линии — где ручка вдвое бледнее середины)
+FLOOD_LINK = 0.25      # бледнее этого штрих не продолжается (связь кусков линии)
+FLOOD_CORE = 0.7       # пятно без такой плотности внутри — соринка, а не штрих
+FLOOD_MIN, FLOOD_MAX = 0.08, 0.3  # пределы порога: шум бумаги на сканах до ~0.12
+CLOSE_PX = 2           # стягиваемый разрыв штриха, пикселей 300 dpi
+GRAIN_PX = 10          # просвет меньше этого (пикселей 300 dpi) внутри штриха — зерно
 
 
 class ImportErrorRu(Exception):
@@ -156,48 +163,75 @@ def extract_ink(rgb: np.ndarray, guides: tuple[float, ...] = (), text: str = "",
     text: что написано в клетке — по нему понятно, может ли там быть точка.
     scale: во сколько раз кроп плотнее 300 dpi."""
     dark = ink_density(rgb, scale)
-    otsu, _ = cv2.threshold((dark * 255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    t = float(np.clip(otsu / 255.0 * 0.8, 0.12, 0.5))
-    mask = (dark > t).astype(np.uint8)
+    mask = flood_ink(dark, scale)
+    if mask is None:
+        return None
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     keep = _keep_components(stats, guides, scale)
     keep = _drop_lone_specks(labels, stats, keep, text, scale)
     mask = keep[labels].astype(np.uint8)
     if mask.sum() < MIN_INK_PX * scale * scale:
         return None
-    return _clean_alpha(dark, mask, t, scale)
+    return _solid_alpha(mask, scale)
 
 
-def _clean_alpha(dark: np.ndarray, mask: np.ndarray, t: float, scale: int) -> np.ndarray:
-    """Плотность чернил без грязи вокруг букв.
+def flood_ink(dark: np.ndarray, scale: int = 1) -> np.ndarray | None:
+    """Чернила «заливкой», как ведром в графическом редакторе.
 
-    Всё, что не рядом с оставленными штрихами, обнуляется (пятна, тень от
-    сгиба, обрывки разметки). Край штриха делается резким: серый ореол от
-    размытия скана и сжатия JPEG при печати выглядел как грязная обводка.
-    Внутри линии остаётся живая плотность ручки."""
-    k = 2 * scale + 1
-    near = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))).astype(np.float32)
-    near = cv2.GaussianBlur(near, (0, 0), 0.5 * scale)
-    # Растягиваем контраст: бледный (пересвеченный) скан даёт такую же
-    # насыщенную линию, как и тёмный. Цвет ручки задаётся при отрисовке.
-    lo = t * 0.55
-    hi = max(float(np.percentile(dark[mask > 0], 85)), lo + 0.1)
-    a = np.clip((dark - lo) / (hi - lo), 0.0, 1.0)
+    Всё, что прозрачнее порога FLOOD_TOL (доля от плотности самой ручки в
+    этой клетке), заливается бумагой. Остальное считается чернилами, но
+    только если пятно дотягивается до настоящего штриха (там чернила
+    плотнее FLOOD_CORE): серые соринки, тень пылинки, след JPEG и ореол
+    вокруг букв уходят целиком, а бледный край настоящей линии остаётся.
+    Мелкие светлые просветы внутри штриха (зерно шарика) заливаются
+    чернилами, большие (дырка в «о») остаются бумагой.
+
+    Порог подобран на сканах бланков: бумага на них почти вся светлее 0.12,
+    а ручка в середине линии — 0.3–0.7 смотря по странице. При половине
+    плотности ручки толщина линии та же, что на скане."""
+    strong = dark[dark > FLOOD_MIN]
+    if strong.size < MIN_INK_PX * scale * scale:
+        return None
+    core = float(np.percentile(strong, 90))
+    tol = float(np.clip(FLOOD_TOL * core, FLOOD_MIN, FLOOD_MAX))
+    link = float(np.clip(FLOOD_LINK * core, FLOOD_MIN, tol))
+    reach = (dark > link).astype(np.uint8)
+    n, labels, _, _ = cv2.connectedComponentsWithStats(reach, connectivity=8)
+    peak = np.zeros(n, np.float32)
+    np.maximum.at(peak, labels.ravel(), dark.ravel())
+    real = peak >= max(FLOOD_CORE * core, tol + 0.05)
+    real[0] = False
+    reach = real[labels].astype(np.uint8)
+    # Толщину линии задаёт порог tol, а бледные тонкие места (ручка едва
+    # коснулась бумаги) не рвутся: по ним идёт тонкая осевая линия.
+    spine = cv2.dilate(cv2.ximgproc.thinning(reach * 255), np.ones((scale + 1, scale + 1), np.uint8)) > 0
+    mask = (((dark > tol) | spine) & (reach > 0)).astype(np.uint8)
     # Где шарик ручки проскочил, линия рвётся на чёрточки: стягиваем разрывы
     # длиной в толщину линии, чтобы при печати штрих не выглядел пунктиром.
-    closed = cv2.morphologyEx(a, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k + 2, k + 2)))
-    a = np.maximum(a, 0.9 * closed) ** 0.8
-    a = a * a * (3 - 2 * a)  # крутой край вместо пологого ореола
-    a = (a * near).astype(np.float32)
+    k = CLOSE_PX * scale + 1
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    holes = 1 - mask
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(holes, connectivity=4)
+    grain = stats[:, 4] < GRAIN_PX * scale * scale
+    grain[np.unique(np.r_[labels[0], labels[-1], labels[:, 0], labels[:, -1]])] = False
+    grain[0] = False
+    mask[grain[labels]] = 1
+    return mask if mask.any() else None
+
+
+def refill(alpha: np.ndarray, scale: int = 1) -> np.ndarray:
+    """Та же заливка для образца, сохранённого прежней очисткой: бледные
+    пятна вокруг уходят, зерно внутри линии становится сплошным. Так старые
+    профили печатаются так же чисто, сканы заново загружать не нужно."""
+    mask = flood_ink(alpha, scale)
+    return alpha if mask is None else _solid_alpha(mask, scale)
+
+
+def _solid_alpha(mask: np.ndarray, scale: int) -> np.ndarray:
+    """Залитые чернила: внутри линии сплошной цвет, без зерна и бледных
+    мест, край сглажен на полпикселя, чтобы не было лесенки."""
+    a = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), 0.5 * scale)
     a[a < 0.04] = 0.0
-    # Бледные пятнышки отдельно от линии: тень пылинки, след сжатия JPEG.
-    n, labels, stats, _ = cv2.connectedComponentsWithStats((a > 0).astype(np.uint8), connectivity=8)
-    if n > 2:
-        peak = np.zeros(n, np.float32)
-        np.maximum.at(peak, labels.ravel(), a.ravel())
-        faint = peak < 0.5
-        faint[0] = False
-        a[faint[labels]] = 0.0
     return a
 
 

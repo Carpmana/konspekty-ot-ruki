@@ -46,6 +46,14 @@ class VariantPicker:
         recent.append(choice.id)
         return choice
 
+    def snapshot(self) -> dict:
+        return {k: deque(v, maxlen=v.maxlen) for k, v in self.recent.items()}
+
+    def restore(self, state: dict) -> None:
+        """Забыть выборы для отброшенной попытки (слово не влезло)."""
+        self.recent.clear()
+        self.recent.update(state)
+
 
 class LeftEdge:
     """Где человек начинает очередную строку у левого края.

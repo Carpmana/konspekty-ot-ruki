@@ -34,6 +34,9 @@ def test_render_preview_and_export_same_pages(profile, tmp_path):
         assert d.page_count == 1
         w_mm = d[0].rect.width / 72 * 25.4
         assert abs(w_mm - 210) < 1.5  # A4 в реальном размере
+        # Без потерь: JPEG давал вокруг букв серые точки, а принтер их печатал.
+        img = d.extract_image(d[0].get_images()[0][0])
+        assert img["ext"] == "png"
 
 
 def test_empty_text_gives_no_pages(profile):
@@ -140,8 +143,8 @@ def crossed_copy(profile, tmp_path):
     p = root / s.file
     a = np.array(Image.open(p))
     h, w = a.shape
-    cv2.line(a, (0, 0), (w - 1, h - 1), 255, 12)
-    cv2.line(a, (w - 1, 0), (0, h - 1), 255, 12)
+    cv2.line(a, (0, 0), (w - 1, h - 1), 255, 16)
+    cv2.line(a, (w - 1, 0), (0, h - 1), 255, 16)
     Image.fromarray(a).save(p)
     return Profile.load(root), s.id
 
@@ -220,8 +223,8 @@ def test_drawn_sample_is_saved_and_removed(profile, tmp_path):
     assert len(again.variants("ж")) == before + 1
     got = next(x for x in again.samples if x.id == s.id)
     assert got.source == "нарисовано в программе" and (root / got.file).exists()
-    # высота строчной ~4 мм при 300 dpi
-    assert 35 < got.baseline < 70
+    # высота строчной ~4 мм при 300 dpi плюс поля в две толщины линии
+    assert 35 < got.baseline < 75
     again.remove(s.id)
     again.save()
     assert not (root / got.file).exists()
