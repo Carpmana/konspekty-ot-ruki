@@ -203,6 +203,22 @@ class FallbackGlyphs:
         return self.items[ch]
 
 
+HYPH_LANGS = ("ru_RU", "be_BY", "en_US")
+
+
+def hyphenators() -> dict[str, pyphen.Pyphen]:
+    """Переносы по языкам. Если словаря нет (неполная сборка), слова этого
+    языка переносятся по русскому словарю, а не роняют вёрстку."""
+    out = {}
+    for lang in HYPH_LANGS:
+        try:
+            out[lang] = pyphen.Pyphen(lang=lang)
+        except KeyError:
+            pass
+    ru = out.get("ru_RU") or next(iter(out.values()))
+    return {lang: out.get(lang, ru) for lang in HYPH_LANGS}
+
+
 class Typesetter:
     def __init__(self, profile: Profile, settings: Settings):
         self.p = profile
@@ -213,7 +229,7 @@ class Typesetter:
         self.fallbacks = FallbackGlyphs(profile)
         self.clusters = profile.clusters()
         self.missing: set[str] = set()
-        self.hyph = {lang: pyphen.Pyphen(lang=lang) for lang in ("ru_RU", "be_BY", "en_US")}
+        self.hyph = hyphenators()
         xh = settings.x_height_mm or self.hp.x_height_mm
         self.xh_mm = xh
         self._shapes: dict = {}

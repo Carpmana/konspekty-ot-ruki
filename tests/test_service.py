@@ -350,3 +350,18 @@ def test_view_templates_roundtrip():
     assert loaded == {"Тетрадь": {"paper": "lines", "weight10": 3}}
     for bad in ("", None, "не json", "[1, 2]"):
         assert sv.load_view_templates(bad) == {}
+
+
+def test_printer_shift_left_up_to_30mm(profile):
+    """Влево можно сдвинуть на 30 мм; справа освобождается белое, размер листа тот же."""
+    import numpy as np
+
+    opts = sv.Options(page="A4", real_paper=True)
+    printed = sv.render_text(TEXT, profile, opts, dpi=60, for_print=True)
+    moved = sv.render_text(TEXT, profile, sv.Options(page="A4", real_paper=True, offset_x_mm=-sv.MAX_SHIFT_LEFT_MM),
+                           dpi=60, for_print=True)
+    a0, a1 = np.asarray(printed.images[0]), np.asarray(moved.images[0])
+    assert a0.shape == a1.shape
+    dx = round(sv.MAX_SHIFT_LEFT_MM * 60 / 25.4)
+    assert np.array_equal(a1[:, : a0.shape[1] - dx], a0[:, dx:])
+    assert (a1[:, a0.shape[1] - dx:] == 255).all()

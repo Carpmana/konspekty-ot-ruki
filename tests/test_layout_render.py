@@ -269,3 +269,32 @@ def test_hyphenation_language_by_word():
     assert word_lang("understanding") == "en_US"
     assert word_lang("інфармацыя") == "be_BY"
     assert word_lang("информация") == "ru_RU"
+
+
+def test_hyphenators_survive_missing_dictionary(monkeypatch):
+    """Без словаря be_BY (неполная сборка) вёрстка не падает, а берёт русский."""
+    import pyphen
+
+    from konspekt import layout as lay
+
+    real = pyphen.Pyphen
+
+    def fake(lang):
+        if lang == "be_BY":
+            raise KeyError(None)
+        return real(lang=lang)
+
+    monkeypatch.setattr(lay.pyphen, "Pyphen", fake)
+    h = lay.hyphenators()
+    assert set(h) == set(lay.HYPH_LANGS)
+    assert h["be_BY"] is h["ru_RU"]
+
+
+def test_build_keeps_all_hyphenation_dictionaries():
+    from pathlib import Path
+
+    from konspekt import layout as lay
+
+    spec = (Path(__file__).parent.parent / "packaging" / "konspekt.spec").read_text(encoding="utf-8")
+    for lang in lay.HYPH_LANGS:
+        assert f"hyph_{lang}.dic" in spec

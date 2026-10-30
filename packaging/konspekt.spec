@@ -21,11 +21,15 @@ DROP = ("opencv_videoio_ffmpeg", "opengl32sw", "Qt6Quick", "Qt6Qml", "Qt6Virtual
         "qtvirtualkeyboardplugin", "Qt6Pdf", "qpdf.dll", "qdirect2d", "_avif.")
 
 
+# Словари переносов: только языки, которые знает layout.HYPH_LANGS.
+HYPH_FILES = ("hyph_ru_RU.dic", "hyph_be_BY.dic", "hyph_en_US.dic")
+
+
 def keep(entry):
     name = entry[0].replace("\\", "/")
     if any(d in name for d in DROP):
         return False
-    return not ("pyphen/dictionaries/" in name and not name.endswith(("hyph_ru_RU.dic", "hyph_en_US.dic")))
+    return not ("pyphen/dictionaries/" in name and not name.endswith(HYPH_FILES))
 
 
 a.binaries = [b for b in a.binaries if keep(b)]

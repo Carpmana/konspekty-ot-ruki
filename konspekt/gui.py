@@ -1381,8 +1381,10 @@ class MainWindow(QMainWindow):
         offs = QHBoxLayout()
         self.off_x = QDoubleSpinBox()
         self.off_y = QDoubleSpinBox()
-        for sp, pre in ((self.off_x, "→ "), (self.off_y, "↓ ")):
-            sp.setRange(-15.0, 15.0)
+        # Влево — до 30 мм: некоторые принтеры берут листок со смещением,
+        # а сдвигать умеет только программа.
+        for sp, pre, lo in ((self.off_x, "→ ", -sv.MAX_SHIFT_LEFT_MM), (self.off_y, "↓ ", -15.0)):
+            sp.setRange(lo, 15.0)
             sp.setSingleStep(0.5)
             sp.setPrefix(pre)
             sp.setSuffix(" мм")
@@ -2741,10 +2743,12 @@ def _smoke(app: QApplication) -> int:
     запасной шрифт, OpenCV, PDF), окно открывается."""
     import tempfile
 
-    from .layout import FALLBACK_FONT, Typesetter  # noqa: F401
+    from .layout import FALLBACK_FONT, HYPH_LANGS, Typesetter  # noqa: F401
     import pyphen
 
     assert FALLBACK_FONT.exists(), FALLBACK_FONT
+    for lang in HYPH_LANGS:  # KeyError, если словарь не попал в сборку
+        pyphen.Pyphen(lang=lang)
     assert pyphen.Pyphen(lang="ru_RU").inserted("конспект") != "конспект"
     import cv2
     assert cv2.ximgproc.thinning(np.zeros((8, 8), np.uint8)).shape == (8, 8)
