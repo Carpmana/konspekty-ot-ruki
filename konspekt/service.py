@@ -41,6 +41,7 @@ FORMATS = [
     PageFormat("A5", "Лист A5", (148.0, 210.0), 20.0, 6.0, "left", 10.0),
 ]
 FORMAT_BY_KEY = {f.key: f for f in FORMATS}
+MAX_SHIFT_LEFT_MM = 30.0  # сдвиг под принтер влево (вправо и по вертикали — до 15 мм)
 PAGES = [f.key for f in FORMATS]
 MARGINS = [("left", "Поле слева"), ("outer", "Снаружи, как в тетради"), ("none", "Без поля")]
 INKS = [("", "Синяя"), ("black", "Чёрная")]  # пусто — цвет чернил профиля
