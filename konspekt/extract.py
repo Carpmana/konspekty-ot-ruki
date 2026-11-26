@@ -168,6 +168,12 @@ def extract_ink(rgb: np.ndarray, guides: tuple[float, ...] = (), text: str = "",
         return None
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     keep = _keep_components(stats, guides, scale)
+    if text in (".", "=", "―"):
+        # Настоящая точка или черта может лежать прямо на пунктире.
+        # Чернила темнее оранжевой направляющей в красном канале.
+        solid = np.bincount(labels[dark > .4], minlength=n)
+        keep |= (solid >= MIN_COMPONENT_PX * scale**2) & (solid >= .45 * stats[:, 4])
+        keep[0] = False
     keep = _drop_lone_specks(labels, stats, keep, text, scale)
     mask = keep[labels].astype(np.uint8)
     if mask.sum() < MIN_INK_PX * scale * scale:
