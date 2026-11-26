@@ -95,6 +95,7 @@ class Settings:
     live_edge: float = 1.0  # 0–2: насколько гуляет начало строк у левого края (0 — почти ровно)
     smoothness: float = 0.5  # 0–1: насколько плавные контуры букв (0 — как в скане, с зерном ручки)
     weight: float = 1.0  # толщина линии: 1 — как на скане, 0.5 — вдвое тоньше, 2 — вдвое толще
+    join_rate: float | None = None
     solid_print: bool = False  # для принтера: чернила одним сплошным цветом, бумага белая (см. render)
 
     @property
@@ -228,6 +229,8 @@ class Typesetter:
         self.picker = VariantPicker(self.rng)
         self.fallbacks = FallbackGlyphs(profile)
         self.clusters = profile.clusters()
+        self.join_rate = self.hp.join_prob if settings.join_rate is None else settings.join_rate
+        self.cluster_rate = self.hp.cluster_prob if settings.join_rate is None else self.join_rate
         self.missing: set[str] = set()
         self.hyph = hyphenators()
         xh = settings.x_height_mm or self.hp.x_height_mm
@@ -288,7 +291,7 @@ class Typesetter:
     # ---------- слова ----------
 
     def _choose(self, word: str, i: int, style: str, plain: bool = True) -> tuple[GlyphSample, str, bool]:
-        if plain and style == BODY and self.rng.random() < self.hp.cluster_prob:
+        if plain and style == BODY and self.rng.random() < self.cluster_rate:
             for L in range(min(MAX_CLUSTER, len(word) - i), 1, -1):
                 sub = word[i:i + L]
                 if sub in self.clusters:
@@ -347,7 +350,7 @@ class Typesetter:
                 p_edges, p_exit, _ = self._shape(prev.sample)
                 join = (not mark and not marks[i - 1] and not prev.fallback and not fb
                         and _is_lower(prev.text[-1]) and _is_lower(text[0])
-                        and p_exit is not None and entry is not None and rng.random() < self.hp.join_prob)
+                        and p_exit is not None and entry is not None and rng.random() < self.join_rate)
                 if join:
                     gap = max(0.35, rng.normal(0.9, 0.25))  # место под соединительный штрих
                 else:
@@ -365,6 +368,8 @@ class Typesetter:
                 x = ox
                 # Нависать можно, но не заезжать глубоко внутрь предыдущей буквы.
                 x = max(x, prev.x + prev.sample.width * prev.scale - 0.35 * xh)
+                if self.join_rate == 0 and prev.text[-1].isalpha() and text[0].isalpha():
+                    x = max(x, right + 0.2)
                 if join:
                     ex = prev.x + p_exit[0] * prev.scale
                     ey = prev.y + (p_exit[1] - prev.sample.baseline) * prev.scale
@@ -383,6 +388,7 @@ class Typesetter:
     # ---------- страницы ----------
 
     def run(self, blocks: list[doc.Block]) -> Layout:
+        from . import formula
         W, H = self.s.page_mm
         left = self.s.margin_left_mm + (2.0 if self.s.margin_line else 0.0)
         right = W - self.s.margin_right_mm
@@ -488,7 +494,10 @@ class Typesetter:
                     deco -= ends
                     continue
                 before = self.picker.snapshot()
-                if w in ARROWS:
+                is_formula = len(w) >= 3 and w.startswith("$") and w.endswith("$")
+                if is_formula:
+                    plan = formula.build(w, self, style, right - left - self.s.indent_mm - 2)
+                elif w in ARROWS:
                     plan = self.build_arrow(ARROWS[w], w)
                 else:
                     plan = self.build_word(w, style)
@@ -507,7 +516,7 @@ class Typesetter:
                     place(plan, gap)
                     continue
                 # Чуть не влезает — человек сожмёт буквы в конце строки.
-                if x + gap + plan.width <= right + overflow + 0.12 * plan.width:
+                if not is_formula and x + gap + plan.width <= right + overflow + 0.12 * plan.width:
                     # Сжатое слово выбирает буквы заново: отличаться они должны
                     # от предыдущего слова, а не от отброшенного варианта.
                     picked = self.picker.snapshot()
@@ -528,7 +537,7 @@ class Typesetter:
                     flush()
                     place(plan, 0.0)
             flush({doc.HEADING: "center", doc.CENTER: "center", doc.RIGHT: "right"}.get(block.kind, "left"))
-        if not pages[-1].glyphs and len(pages) > 1:
+        if not pages[-1].trace and len(pages) > 1:
             pages.pop()
         return Layout(pages, self.missing, self.s)
 

@@ -7,7 +7,7 @@ from konspekt.template import layout_cells, save_template_pdf
 
 def test_all_cells_found(import_report):
     pages = layout_cells()
-    assert sorted(set(import_report.pages_found)) == list(range(len(pages)))
+    assert sorted(set(import_report.pages_found)) == [p[0].page for p in pages]
     assert import_report.empty_cells == 0
     expected = [c.request for cells in pages for c in cells]
     assert [s.cell.request for s in import_report.samples] == expected
@@ -53,7 +53,11 @@ def test_main_template_layout_is_stable():
     # Уже заполненные пользователем бланки должны читаться и после изменений.
     from konspekt.template import set_pages
 
-    pages = set_pages("main")
+    from konspekt.template import all_pages
+    current = set_pages("main")
+    assert len(current) == 4
+    assert all(c.request.style != "heading" for page in current for c in page)
+    pages = [all_pages()[i][1] for i in range(5)]
     assert [len(p) for p in pages] == [90, 90, 87, 48, 28]
     assert pages[0][0].x == 18.0 and pages[0][0].page == 0
 
@@ -206,7 +210,7 @@ def test_belarusian_template_adds_to_profile(tmp_path, profile):
 
     pages = set_pages("be")
     assert len(pages) == 1 and pages[0][0].page == 10
-    assert len(all_pages()) == 12  # номера страниц бланков не пересекаются
+    assert len(all_pages()) == 16  # номера страниц бланков не пересекаются
     p = tmp_path / "бел.jpg"
     Image.fromarray(photograph(fill_template(FONT, seed=4, key="be")[0], seed=21)).save(p, quality=95)
     rep = import_files([p])

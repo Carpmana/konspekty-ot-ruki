@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .charset import HEADING, SampleRequest, be_requests, en_requests, extra_requests, sample_requests
+from .charset import HEADING, SampleRequest, be_requests, en_requests, extra_requests, legacy_main_requests, sample_requests
 from .units import A4_MM, mm_to_px
 
 TEMPLATE_VERSION = 1
@@ -77,18 +77,66 @@ class TemplateSet:
 # Каждый бланк занимает свой диапазон номеров меток, поэтому импорт по фото
 # сам понимает, какой это бланк и какая страница.
 TEMPLATE_SETS = {
-    "main": TemplateSet("main", "основной", sample_requests, 0),
+    "main": TemplateSet("main", "основной", sample_requests, 16),
     "extra": TemplateSet("extra", "дополнительный", extra_requests, 5),
     "be": TemplateSet("be", "белорусский", be_requests, 10),
     "en": TemplateSet("en", "английский", en_requests, 12),
 }
 
 
-def layout_cells(requests: list[SampleRequest] | None = None, first_page: int = 0) -> list[list[Cell]]:
+CUSTOM_PAGE = 24
+CUSTOM_CHUNK = 40
+
+
+def custom_cells(symbols):
+    return layout_cells([SampleRequest(ch) for ch in symbols], CUSTOM_PAGE)[0]
+
+
+def custom_code(symbols):
+    payload = "K1:" + symbols.encode("utf-8").hex().upper()
+    matrix = cv2.QRCodeEncoder_create().encode(payload)
+    # Целое число пикселей на модуль выдерживает повторное растрирование PDF.
+    size = matrix.shape[0] * (round(mm_to_px(42, DPI)) // matrix.shape[0])
+    return Image.fromarray(matrix).resize((size, size), Image.Resampling.NEAREST)
+
+
+def decode_custom(flat):
+    # У пользовательского бланка не больше четырёх рядов клеток. Код ниже них.
+    crop = flat[round(mm_to_px(175, DPI)):round(mm_to_px(231, DPI)),
+                round(mm_to_px(77, DPI)):round(mm_to_px(134, DPI))]
+    decoded, _ = cv2.wechat_qrcode_WeChatQRCode().detectAndDecode(crop)
+    value = next((item for item in decoded if item.startswith("K1:")), "")
+    if not value.startswith("K1:"):
+        return ""
+    try:
+        chars = bytes.fromhex(value[3:]).decode("utf-8")
+    except ValueError:
+        return ""
+    return chars if 0 < len(chars) <= CUSTOM_CHUNK and chars.isprintable() else ""
+
+
+def save_symbol_pdf(path, symbols):
+    chars = "".join(ch for ch in symbols if ch.isprintable() and not ch.isspace())
+    if not chars:
+        raise ValueError("Введите хотя бы один символ.")
+    chunks = [chars[i:i + CUSTOM_CHUNK] for i in range(0, len(chars), CUSTOM_CHUNK)]
+    from .render import save_pdf
+    images = [render_page(custom_cells(chunk), CUSTOM_PAGE, len(chunks), CUSTOM_SET, i)
+              for i, chunk in enumerate(chunks, 1)]
+    save_pdf(images, path, DPI)
+    return len(chunks)
+
+
+CUSTOM_SET = TemplateSet("custom", "свои символы", None, CUSTOM_PAGE)
+
+
+def layout_cells(requests: list[SampleRequest] | None = None, first_page: int = 16) -> list[list[Cell]]:
     """Раскладывает запросы по клеткам и страницам. Детерминировано:
     импорт вызывает ту же функцию и получает те же координаты."""
     requests = sample_requests() if requests is None else requests
     x0, y0, x1, y1 = AREA_MM
+    if first_page == 16:
+        x0, x1 = 12., 198.
     pages: list[list[Cell]] = [[]]
     x, y = x0, y0 + LABEL_H_MM
     prev_style = None
@@ -119,8 +167,9 @@ def set_pages(key: str = "main") -> list[list[Cell]]:
 def all_pages() -> dict[int, tuple[TemplateSet, list[Cell], int]]:
     """Номер страницы в метках → (бланк, клетки, число страниц бланка)."""
     out = {}
-    for ts in TEMPLATE_SETS.values():
-        pages = set_pages(ts.key)
+    legacy = TemplateSet("main_v1", "основной", legacy_main_requests, 0)
+    for ts in (*TEMPLATE_SETS.values(), legacy):
+        pages = layout_cells(ts.requests(), ts.first_page)
         for cells in pages:
             out[cells[0].page] = (ts, cells, len(pages))
     return out
@@ -140,7 +189,7 @@ def _label(req: SampleRequest) -> str:
     return req.text
 
 
-def render_page(cells: list[Cell], page: int, n_pages: int, ts: TemplateSet | None = None) -> Image.Image:
+def render_page(cells: list[Cell], page: int, n_pages: int, ts: TemplateSet | None = None, ordinal: int | None = None) -> Image.Image:
     ts = ts or TEMPLATE_SETS["main"]
     px = lambda mm: int(round(mm_to_px(mm, DPI)))  # noqa: E731
     W, H = px(A4_MM[0]), px(A4_MM[1])
@@ -154,14 +203,18 @@ def render_page(cells: list[Cell], page: int, n_pages: int, ts: TemplateSet | No
         img.paste(Image.fromarray(marker).convert("RGB"), (px(cx) - size // 2, px(cy) - size // 2))
 
     head = _font(px(3.2))
-    draw.text((px(26), px(9)), f"Бланк образцов почерка ({ts.title}) · страница {page - ts.first_page + 1} из {n_pages} · версия {TEMPLATE_VERSION}",
+    draw.text((px(26), px(9)), f"Бланк образцов почерка ({ts.title}) · страница {ordinal or page - ts.first_page + 1} из {n_pages} · версия {2 if ts.key == 'main' else TEMPLATE_VERSION}",
               fill=LABEL_COLOR, font=head)
     small = _font(px(2.6))
-    for i, line in enumerate([
+    instructions = [
         "Пишите обычной ручкой, по одному образцу в клетку. Буквы ставьте на пунктир,",
         "строчные высотой до верхней точечной линии. Не заходите за уголки клетки.",
-        "«печ.» — печатные заглавные, как вы пишете заголовки.",
-    ]):
+    ]
+    if ts.key == "main_v1":
+        instructions.append("«печ.» — печатные заглавные, как вы пишете заголовки.")
+    elif ts.key == "main":
+        instructions.append("√ — знак корня, ― — черта дроби. Напишите каждый знак тремя вариантами.")
+    for i, line in enumerate(instructions):
         draw.text((px(26), px(13.5 + 3.6 * i)), line, fill=LABEL_COLOR, font=small)
 
     label_font = _font(px(3.0))
@@ -177,6 +230,8 @@ def render_page(cells: list[Cell], page: int, n_pages: int, ts: TemplateSet | No
         for xx in range(l + tick, r - tick, 18):
             draw.line([(xx, xy), (xx + 4, xy)], fill=GUIDE_COLOR, width=2)
         draw.text((l, px(c.y - LABEL_H_MM + 0.3)), _label(c.request), fill=LABEL_COLOR, font=label_font)
+    if ts.key == 'custom':
+        img.paste(custom_code(''.join(c.request.text for c in cells)), (px(84), px(182)))
     return img
 
 

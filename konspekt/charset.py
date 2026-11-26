@@ -36,7 +36,7 @@ class SampleRequest:
         return len(self.text) > 1
 
 
-def sample_requests() -> list[SampleRequest]:
+def legacy_main_requests() -> list[SampleRequest]:
     reqs: list[SampleRequest] = []
     for ch in RU_LOWER:
         reqs += [SampleRequest(ch)] * 3
@@ -57,6 +57,11 @@ def sample_requests() -> list[SampleRequest]:
         seen.add(w)
         reqs += [SampleRequest(w)] * (2 if len(w) <= 3 else 1)
     return reqs
+
+
+def sample_requests() -> list[SampleRequest]:
+    requests = [r for r in legacy_main_requests() if r.style != HEADING]
+    return requests + [SampleRequest(ch) for ch in "√√√―――"]
 
 
 # Буквы по убыванию частоты в русских текстах.

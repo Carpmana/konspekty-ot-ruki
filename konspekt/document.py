@@ -35,7 +35,7 @@ class Block:
 
     @property
     def words(self) -> list[str]:
-        return self.text.split()
+        return re.findall(r"\$[^$\n]+\$|(?:[^\s$]|\$(?![^$\n]+\$))+", self.text)
 
 
 def parse(text: str) -> list[Block]:

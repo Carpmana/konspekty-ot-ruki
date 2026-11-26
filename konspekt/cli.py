@@ -15,7 +15,7 @@ from .extract import ImportErrorRu, import_files
 from .profile import Profile, safe_folder_name
 from .render import render, save_pdf, save_pngs
 from .service import INK_COLORS, INKS
-from .template import TEMPLATE_SETS, save_template_pdf
+from .template import TEMPLATE_SETS, save_symbol_pdf, save_template_pdf
 
 
 def _profile_dir(args, name: str) -> Path:
@@ -26,6 +26,10 @@ def _profile_dir(args, name: str) -> Path:
 
 
 def cmd_template(args) -> int:
+    if args.symbols is not None:
+        n = save_symbol_pdf(args.out, args.symbols)
+        print(f"Бланк символов сохранён: {args.out} ({n} стр.)")
+        return 0
     n = save_template_pdf(args.out, args.set)
     print(f"Бланк «{TEMPLATE_SETS[args.set].title}» сохранён: {args.out} ({n} стр.). "
           "Распечатайте, заполните ручкой и отсканируйте.")
@@ -102,7 +106,9 @@ def main(argv: list[str] | None = None) -> int:
 
     t = sub.add_parser("template", help="создать бланк образцов (PDF)")
     t.add_argument("out")
-    t.add_argument("--set", default="main", choices=list(TEMPLATE_SETS),
+    templates = t.add_mutually_exclusive_group()
+    templates.add_argument("--symbols", help="свои символы по порядку, например αβΩ±")
+    templates.add_argument("--set", default="main", choices=list(TEMPLATE_SETS),
                    help="main — основной бланк, extra — дополнительный (больше вариантов частых букв, слова)")
     t.set_defaults(func=cmd_template)
 

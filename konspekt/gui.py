@@ -36,7 +36,8 @@ from .layout import Settings as LayoutSettings, typeset
 from .profile import DRAWN_SOURCE, RAISE_LIMITS_MM, SCALE_LIMITS, GlyphSample, Profile
 from .render import render_page
 from .print_wizard import PrintPage, PrintStep
-from .template import TEMPLATE_SETS, save_template_pdf
+from .symbols import GROUPS
+from .template import TEMPLATE_SETS, save_symbol_pdf, save_template_pdf
 from .viewer import PagesView
 
 APP_NAME = "Конспекты от руки"
@@ -933,6 +934,42 @@ class DrawCanvas(QWidget):
         p.end()
 
 
+class SymbolsDialog(QDialog):
+    def __init__(self, parent, blank=False):
+        super().__init__(parent)
+        self.setWindowTitle("Символы для бланка" if blank else "Вставить символы")
+        layout = QVBoxLayout(self)
+        groups = QComboBox()
+        groups.addItems(list(GROUPS))
+        layout.addWidget(groups)
+        grid = QGridLayout()
+        layout.addLayout(grid)
+        self.entry = QLineEdit()
+        self.entry.setPlaceholderText("Выберите знаки выше или введите свои")
+        layout.addWidget(self.entry)
+        if blank:
+            group_btn = QPushButton("Добавить всю группу")
+            group_btn.clicked.connect(lambda: self.entry.insert(GROUPS[groups.currentText()]))
+            layout.addWidget(group_btn)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        def show_group(name):
+            while grid.count():
+                grid.takeAt(0).widget().deleteLater()
+            for i, ch in enumerate(GROUPS[name]):
+                button = QToolButton()
+                button.setText(ch)
+                button.setMinimumSize(36, 32)
+                button.clicked.connect(lambda checked=False, symbol=ch: self.entry.insert(symbol))
+                grid.addWidget(button, i // 9, i % 9)
+
+        groups.currentTextChanged.connect(show_group)
+        show_group(groups.currentText())
+
+
 class DrawDialog(QDialog):
     """Дорисовать варианты букв без сканера: нарисовать, сохранить, удалить неудачный."""
 
@@ -947,7 +984,7 @@ class DrawDialog(QDialog):
         row.addWidget(QLabel("Буква или сочетание:"))
         self.text_box = QComboBox()
         self.text_box.setEditable(True)
-        self.text_box.addItems(list(RU_LOWER + RU_UPPER + DIGITS + PUNCT + BE_ONLY + LAT_LOWER + LAT_UPPER + EN_PUNCT))
+        self.text_box.addItems(list(RU_LOWER + RU_UPPER + DIGITS + PUNCT + BE_ONLY + LAT_LOWER + LAT_UPPER + EN_PUNCT + "".join(GROUPS.values())))
         self.text_box.setCurrentText(start or "а")
         row.addWidget(self.text_box, 1)
         self.count_label = QLabel(objectName="hint")
@@ -1056,7 +1093,7 @@ TEMPLATE_HINTS = {
 
 WELCOME_STEPS = [
     ("Распечатайте бланк",
-     "5 листов A4 с клетками для букв. Печатайте в реальном размере (масштаб 100%)."),
+     "4 листа A4 с клетками для букв. Печатайте в реальном размере (масштаб 100%)."),
     ("Заполните ручкой",
      "Той ручкой, которой пишете конспекты. В каждую клетку одну букву или слово, буквы ставьте на "
      "пунктир. Пишите как обычно, не красивее: программа повторит именно ваш почерк."),
@@ -1232,6 +1269,8 @@ class MainWindow(QMainWindow):
         blank_menu = QMenu(blank)
         for key, ts in TEMPLATE_SETS.items():
             blank_menu.addAction(f"{ts.title.capitalize()} бланк…", lambda k=key: self.save_template(k))
+        blank_menu.addAction("Символы для физики…", lambda: self.symbol_blank(physics=True))
+        blank_menu.addAction("Свои символы…", self.symbol_blank)
         blank.setMenu(blank_menu)
         row.addWidget(imp, 1)
         row.addWidget(blank)
@@ -1330,6 +1369,14 @@ class MainWindow(QMainWindow):
         eends.addStretch(1)
         eends.addWidget(QLabel("свободно", objectName="hint"))
         sl.addLayout(eends)
+        self.joins = QCheckBox("Соединять буквы")
+        sl.addWidget(self.joins)
+        self.join_percent = QSpinBox()
+        self.join_percent.setRange(0, 100)
+        self.join_percent.setSuffix(" %")
+        self.join_percent.setToolTip("Доля подходящих пар букв. Учитываются также образцы сочетаний.")
+        field("Частота соединений", self.join_percent)
+        self.joins.toggled.connect(self.join_percent.setEnabled)
         self.smooth_slider = QSlider(Qt.Horizontal)
         self.smooth_slider.setRange(0, 10)
         self.smooth_slider.setToolTip("Буквы печатаются сплошной гладкой линией, как шрифт. Чем правее, тем "
@@ -1378,6 +1425,26 @@ class MainWindow(QMainWindow):
         self.on_clean.setChecked(True)
         sl.addWidget(self.on_clean)
         sl.addWidget(self.real_paper)
+        self.black_print = QCheckBox("Сплошные чёрные чернила для печати и PDF")
+        sl.addWidget(self.black_print)
+        self.a4_feed = QCheckBox("Печатать разворот через формат A4")
+        sl.addWidget(self.a4_feed)
+        self.notebook_count = QComboBox()
+        self.notebook_count.addItem("Страниц в тетради: по тексту", 0)
+        for count in range(4, 385, 4):
+            self.notebook_count.addItem(f"Страниц в тетради: {count}", count)
+        sl.addWidget(self.notebook_count)
+        self.range_edit = QLineEdit()
+        self.range_edit.setPlaceholderText("Страницы для печати: все")
+        self.range_edit.setToolTip("Номера страниц конспекта, например 1, 3–5, 8")
+        sl.addWidget(self.range_edit)
+        self.fold_adjust = QDoubleSpinBox()
+        self.fold_adjust.setRange(-30, 30)
+        self.fold_adjust.setSingleStep(.5)
+        self.fold_adjust.setPrefix("Вторая страница: ")
+        self.fold_adjust.setSuffix(" мм")
+        self.fold_adjust.setToolTip("Поправка к расстоянию 170 мм между началами страниц")
+        sl.addWidget(self.fold_adjust)
         offs = QHBoxLayout()
         self.off_x = QDoubleSpinBox()
         self.off_y = QDoubleSpinBox()
@@ -1393,8 +1460,9 @@ class MainWindow(QMainWindow):
         self.offset_label = QLabel("Сдвиг под принтер")
         sl.addWidget(self.offset_label)
         sl.addLayout(offs)
-        self.real_hint = hint("Вставьте листок в лоток как бумагу размера «Тетрадный листок». "
+        self.real_hint = hint("Стрелки сдвигают начало печати на листе. "
                               "Если строки легли не по клеткам, сдвиньте текст и напечатайте снова.")
+        sl.addWidget(self.real_hint)
         self.spread_box = QCheckBox("Двойной листок целиком\n(2 страницы рядом, с оборотом)")
         self.spread_box.setToolTip("Развёрнутый двойной листок 340×205 мм вставляется в принтер узкой стороной. "
                                    "Сначала печатаются страницы 4 и 1, потом листок переворачивают — 2 и 3.")
@@ -1586,6 +1654,7 @@ class MainWindow(QMainWindow):
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged, self.ink_box.currentIndexChanged,
                     self.margin_box.currentIndexChanged, self.seed_spin.valueChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
+                    self.joins.toggled, self.join_percent.valueChanged,
                     self.edge_slider.valueChanged, self.smooth_slider.valueChanged, self.weight_slider.valueChanged,
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged,
                     self.show_missing.toggled, self.text_edit.textChanged):
@@ -1593,12 +1662,17 @@ class MainWindow(QMainWindow):
         for sig in (self.paper_box.currentIndexChanged, self.page_box.currentIndexChanged,
                     self.ink_box.currentIndexChanged, self.margin_box.currentIndexChanged,
                     self.neat_slider.valueChanged, self.tired_slider.valueChanged, self.fix_slider.valueChanged,
+                    self.joins.toggled, self.join_percent.valueChanged,
                     self.edge_slider.valueChanged, self.smooth_slider.valueChanged, self.weight_slider.valueChanged,
                     self.size_spin.valueChanged, self.pitch_spin.valueChanged):
             sig.connect(self._sync_template)
         self.text_edit.textChanged.connect(self._update_counter)
         self.page_box.currentIndexChanged.connect(self._format_changed)
         self.paper_box.currentIndexChanged.connect(self._lining_changed)
+        for signal in (self.real_paper.toggled, self.a4_feed.toggled, self.notebook_count.currentIndexChanged, self.fold_adjust.valueChanged,
+                       self.off_x.valueChanged, self.off_y.valueChanged, self.flip_back.toggled):
+            signal.connect(self.schedule_preview)
+        self.a4_feed.toggled.connect(self._update_print_mode)
         self.real_paper.toggled.connect(self._update_print_mode)
         self.spread_box.toggled.connect(self._update_print_mode)
         self.spread_box.toggled.connect(self.schedule_preview)
@@ -1647,6 +1721,10 @@ class MainWindow(QMainWindow):
         for w in (self.offset_label, self.off_x, self.off_y, self.real_hint):
             w.setVisible(on)
         notebook = self.page_box.currentData() == "notebook"
+        calibrated = on and notebook and self.spread_box.isChecked()
+        self.a4_feed.setVisible(calibrated)
+        self.notebook_count.setVisible(notebook and self.spread_box.isChecked())
+        self.fold_adjust.setVisible(calibrated and self.a4_feed.isChecked())
         self.spread_box.setVisible(notebook)
         self.flip_back.setVisible(notebook and self.spread_box.isChecked())
         self.nested_box.setVisible(notebook and self.spread_box.isChecked())
@@ -1676,6 +1754,7 @@ class MainWindow(QMainWindow):
         act(m, "Сохранить дополнительный бланк (PDF)…", lambda: self.save_template("extra"))
         act(m, "Сохранить белорусский бланк (PDF)…", lambda: self.save_template("be"))
         act(m, "Сохранить английский бланк (PDF)…", lambda: self.save_template("en"))
+        act(m, "Бланк со своими символами…", self.symbol_blank)
         act(m, "Что есть в профиле", self.show_coverage)
         act(m, "Редактор букв…", self.edit_samples, "Ctrl+B")
         act(m, "Нарисовать буквы…", self.draw_letters, "Ctrl+D")
@@ -1724,6 +1803,13 @@ class MainWindow(QMainWindow):
         self.tired_slider.setValue(int(q.value("tiredness10", 3)))
         self.fix_slider.setValue(int(q.value("corrections10", 0)))
         self.edge_slider.setValue(int(q.value("live_edge10", 5)))
+        self.joins.setChecked(q.value("join_enabled", True, type=bool))
+        self.join_percent.setEnabled(self.joins.isChecked())
+        self.join_percent.setValue(int(q.value("join_percent", 35)))
+        self.black_print.setChecked(q.value("black_print", True, type=bool))
+        self.a4_feed.setChecked(q.value("a4_feed", True, type=bool))
+        self.notebook_count.setCurrentIndex(max(0, self.notebook_count.findData(int(q.value("notebook_pages", 0)))))
+        self.fold_adjust.setValue(float(q.value("fold_adjust_mm", 0)))
         self.smooth_slider.setValue(int(q.value("smooth10", 5)))
         self.weight_slider.setValue(int(q.value("weight10", 0)))
         self.ink_box.setCurrentIndex(max(0, self.ink_box.findData(q.value("ink", ""))))
@@ -1761,6 +1847,12 @@ class MainWindow(QMainWindow):
         q.setValue("tiredness10", self.tired_slider.value())
         q.setValue("corrections10", self.fix_slider.value())
         q.setValue("live_edge10", self.edge_slider.value())
+        q.setValue("join_enabled", self.joins.isChecked())
+        q.setValue("join_percent", self.join_percent.value())
+        q.setValue("black_print", self.black_print.isChecked())
+        q.setValue("a4_feed", self.a4_feed.isChecked())
+        q.setValue("notebook_pages", self.notebook_count.currentData())
+        q.setValue("fold_adjust_mm", self.fold_adjust.value())
         q.setValue("smooth10", self.smooth_slider.value())
         q.setValue("weight10", self.weight_slider.value())
         q.setValue("ink", self.ink_box.currentData())
@@ -1780,6 +1872,9 @@ class MainWindow(QMainWindow):
                           seed=self.seed_spin.value(), neatness=self.neat_slider.value() / 10,
                           size_mm=size if size > 0 else None, pitch_mm=self.pitch_spin.value(),
                           show_missing=self.show_missing.isChecked(), margins=self.margin_box.currentData(),
+                          join_rate=self.join_percent.value()/100 if self.joins.isChecked() else 0.,
+                          black_print=self.black_print.isChecked(), a4_feed=self.a4_feed.isChecked(),
+                          notebook_pages=self.notebook_count.currentData(), fold_adjust_mm=self.fold_adjust.value(),
                           real_paper=self.real_paper.isChecked(), offset_x_mm=self.off_x.value(),
                           offset_y_mm=self.off_y.value(), spread=self.spread_box.isChecked(),
                           nested=self.nested_box.isChecked(), tiredness=self.tired_slider.value() / 10,
@@ -1795,6 +1890,7 @@ class MainWindow(QMainWindow):
                 "margins": self.margin_box.currentData(), "ink": self.ink_box.currentData(),
                 "neatness10": self.neat_slider.value(), "tiredness10": self.tired_slider.value(),
                 "corrections10": self.fix_slider.value(), "live_edge10": self.edge_slider.value(),
+                "join_enabled": self.joins.isChecked(), "join_percent": self.join_percent.value(),
                 "smooth10": self.smooth_slider.value(), "weight10": self.weight_slider.value(),
                 "size_mm": self.size_spin.value(), "pitch_mm": self.pitch_spin.value()}
 
@@ -1806,6 +1902,10 @@ class MainWindow(QMainWindow):
                 i = box.findData(vals[key])
                 if i >= 0:
                     box.setCurrentIndex(i)
+        if "join_enabled" in vals:
+            self.joins.setChecked(bool(vals["join_enabled"]))
+        if "join_percent" in vals:
+            self.join_percent.setValue(int(vals["join_percent"]))
         combo(self.page_box, "page")
         combo(self.paper_box, "paper")
         combo(self.margin_box, "margins")
@@ -1979,6 +2079,22 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self.refresh_preview()
 
+    def symbol_blank(self, checked=False, *, physics=False):
+        dlg = SymbolsDialog(self, blank=True)
+        if physics:
+            dlg.entry.setText("".join(dict.fromkeys("".join(GROUPS.values()))))
+        if dlg.exec() != QDialog.Accepted or not dlg.entry.text().strip():
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Бланк символов", "символы.pdf", "PDF (*.pdf)")
+        if path:
+            self._run(save_symbol_pdf, (path, dlg.entry.text()), lambda n: QMessageBox.information(
+                self, APP_NAME, f"Бланк сохранён ({n} стр.). После заполнения импортируйте скан."), "Создание бланка…")
+
+    def insert_symbols(self):
+        dlg = SymbolsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            self.text_edit.insertPlainText(dlg.entry.text())
+
     def save_template(self, key: str = "main"):
         title = TEMPLATE_SETS[key].title
         path, _ = QFileDialog.getSaveFileName(self, f"Бланк: {title}", f"бланк_{title}.pdf", "PDF (*.pdf)")
@@ -2126,6 +2242,9 @@ class MainWindow(QMainWindow):
             return k if shortcuts else None
 
         today = datetime.date.today
+        act(m, "Библиотека символов…", self.insert_symbols)
+        act(m, "Формула с дробью", lambda: self.text_edit.insertPlainText(r"$\frac{a}{b}$"))
+        act(m, "Квадратный корень", lambda: self.text_edit.insertPlainText(r"$\sqrt{x^2+y^2}$"))
         act(m, "Дата справа (словами)", lambda: self.insert_line(">> " + sv.date_words(today())))
         act(m, "Дата справа (цифрами)", lambda: self.insert_line(">> " + today().strftime("%d.%m.%Y")))
         act(m, "«Классная работа» по центру", lambda: self.insert_line("= Классная работа"))
@@ -2288,12 +2407,14 @@ class MainWindow(QMainWindow):
         opts = self.options()
         printer = QPrinter(QPrinter.HighResolution)
         orient = QPageLayout.Landscape if opts.use_spread else QPageLayout.Portrait
-        printer.setPageLayout(QPageLayout(page_size(opts.page, opts.use_spread), orient,
+        printer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4) if opts.a4_spread else page_size(opts.page, opts.use_spread), orient,
                                           printer.pageLayout().margins()))
+        if opts.black_print and opts.real_paper:
+            printer.setColorMode(QPrinter.GrayScale)
         printer.setFullPage(True)  # страница рисуется в реальном размере, без масштабирования
         if QPrintDialog(printer, self).exec() != QDialog.Accepted:
             return
-        self._run(sv.render_text, (self.text_edit.toPlainText(), self.profile, opts, sv.PRINT_DPI, True),
+        self._run(sv.render_text, (self.text_edit.toPlainText(), self.profile, opts, sv.PRINT_DPI, True, self.range_edit.text().strip()),
                   lambda r: self._paint_to_printer(printer, r), "Подготовка страниц к печати…")
 
     def _paint_to_printer(self, printer: QPrinter, r: sv.Rendered, ask_flip: bool = True):
@@ -2303,12 +2424,12 @@ class MainWindow(QMainWindow):
             return
         # Без шагов (проверки): все стороны подряд, как их печатал бы человек.
         if not r.is_spread:
-            self._paint_images(printer, r.images)
+            self._paint_images(printer, r.images, r.dpi)
             return
         for outer, inner in r.sheets():
-            if not self._paint_images(printer, [r.images[outer]]):
+            if not (r.blank and r.blank[outer]) and not self._paint_images(printer, [r.images[outer]], r.dpi):
                 return
-            if inner is not None and not self._paint_images(printer, [r.images[inner]]):
+            if inner is not None and not self._paint_images(printer, [r.images[inner]], r.dpi):
                 return
 
     def _plan_subtitle(self, r: sv.Rendered, printer: QPrinter | None = None) -> str:
@@ -2346,7 +2467,7 @@ class MainWindow(QMainWindow):
             return q.scaledToWidth(min(q.width(), 700), Qt.SmoothTransformation)
 
         def job(images):
-            return None if printer is None else (lambda: self._paint_images(printer, images))
+            return None if printer is None else (lambda: self._paint_images(printer, images, r.dpi))
 
         if not r.is_spread:
             n = len(r.images)
@@ -2374,7 +2495,13 @@ class MainWindow(QMainWindow):
         sheets = r.sheets()
         n = len(sheets)
         for i, (outer, inner) in enumerate(sheets):
-            head = f"Листок {i + 1}: " if n > 1 else ""
+            head = r.labels[outer].split(",", 1)[0] + ": "
+            if r.blank and r.blank[outer] and inner is not None:
+                face = small(r.images[inner])
+                steps.append(PrintStep(head + "положите листок внутренней стороной для печати",
+                                       r.labels[inner], "insert", face, "Печатать внутреннюю сторону",
+                                       job([r.images[inner]]), mini=face))
+                continue
             more = " Подпишите карандашом в уголке номер листка." if n > 1 else ""
             outer_img = small(r.images[outer])
             steps.append(PrintStep(
@@ -2427,16 +2554,17 @@ class MainWindow(QMainWindow):
         elif k == 2:
             self._update_plan()
 
-    def _paint_images(self, printer: QPrinter, images) -> bool:
+    def _paint_images(self, printer: QPrinter, images, dpi) -> bool:
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.warning(self, APP_NAME, "Не удалось начать печать.")
             return False
-        target = printer.pageLayout().fullRectPixels(printer.resolution())
+        painter.setRenderHint(QPainter.LosslessImageRendering, True)
+        factor = printer.resolution() / dpi
         for k, im in enumerate(images):
             if k:
                 printer.newPage()
-            painter.drawImage(target, to_qimage(im))
+            painter.drawImage(QRectF(0, 0, im.width*factor, im.height*factor), to_qimage(im))
         painter.end()
         return True
 
@@ -2753,9 +2881,17 @@ def _smoke(app: QApplication) -> int:
     import cv2
     assert cv2.ximgproc.thinning(np.zeros((8, 8), np.uint8)).shape == (8, 8)
     assert cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50) is not None
-    assert updates.current_version(), "сборка не записала номер версии"
+    if os.environ.get("KONSPEKT_SMOKE") != "local":
+        assert updates.current_version(), "сборка не записала номер версии"
     with tempfile.TemporaryDirectory() as d:
         assert save_template_pdf(Path(d) / "бланк.pdf") > 0
+        from .extract import import_files
+        symbols = Path(d) / "символы.pdf"
+        save_symbol_pdf(symbols, "αΩ±")
+        assert import_files([symbols]).empty_cells == 3
+        prof = Profile.create(Path(d) / "physics", "Проверка")
+        output = sv.export_pdf(r"$\sqrt{\frac{v^2}{g}}$", prof, sv.Options(), Path(d) / "формула.pdf", dpi=100)
+        assert len(output.images) == 1
         w = MainWindow(Path(d) / "profiles", QSettings(str(Path(d) / "s.ini"), QSettings.IniFormat))
         w.show()
         QTimer.singleShot(1000, app.quit)

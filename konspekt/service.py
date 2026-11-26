@@ -129,7 +129,7 @@ def delete_profile(profiles_dir: str | Path, path: str | Path, trash=None) -> Pa
 
 # что входит в шаблон вида: значения элементов окна, как они хранятся в настройках
 VIEW_TEMPLATE_KEYS = ("page", "paper", "margins", "ink", "neatness10", "tiredness10", "corrections10",
-                      "live_edge10", "smooth10", "weight10", "size_mm", "pitch_mm")
+                      "live_edge10", "join_enabled", "join_percent", "smooth10", "weight10", "size_mm", "pitch_mm")
 
 
 def load_view_templates(raw) -> dict[str, dict]:
@@ -390,6 +390,20 @@ class Options:
     ink: str = ""  # цвет ручки из INKS; пусто — как в профиле
     weight: float = 1.0  # толщина линии: 1 — как на скане
 
+    join_rate: float | None = None
+    notebook_pages: int = 0  # вместимость одной тетради, 0 — по тексту
+    black_print: bool = True
+    a4_feed: bool = False
+    fold_adjust_mm: float = 0.0
+
+    @property
+    def a4_spread(self):
+        return self.use_spread and self.real_paper and self.a4_feed
+
+    @property
+    def second_start_mm(self):
+        return self.fmt.size_mm[0] + self.fold_adjust_mm
+
     @property
     def fmt(self) -> PageFormat:
         return FORMAT_BY_KEY.get(self.page, FORMAT_BY_KEY["A4"])
@@ -420,7 +434,7 @@ class Options:
                             margin_right_mm=f.inner_mm,
                             tiredness=self.tiredness, corrections=self.corrections, live_edge=self.live_edge,
                             smoothness=self.smoothness, ink_color=INK_COLORS.get(self.ink),
-                            weight=self.weight)
+                            weight=self.weight, join_rate=self.join_rate)
 
 
 @dataclass
@@ -470,8 +484,25 @@ def printer_shift(im: Image.Image, opts: Options, dpi: int) -> Image.Image:
     return moved
 
 
+def selected_pages(expression: str, count: int) -> set[int]:
+    if not expression.strip():
+        return set(range(1, count + 1))
+    import re
+    pages = set()
+    for item in expression.split(","):
+        match = re.fullmatch(r"\s*(\d+)\s*(?:[-–—]\s*(\d+))?\s*", item)
+        if not match:
+            raise ValueError("Введите номера страниц через запятую, например 1, 3–5.")
+        start = int(match[1])
+        end = int(match[2] or start)
+        if not 1 <= start <= end <= count:
+            raise ValueError(f"В конспекте {count} стр. Проверьте диапазон {item.strip()}.")
+        pages.update(range(start, end + 1))
+    return pages
+
+
 def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
-                for_print: bool = False) -> Rendered:
+                for_print: bool = False, page_range: str = "") -> Rendered:
     """Текст → картинки страниц. Вёрстка в миллиметрах, поэтому предпросмотр
     и печать при разном dpi дают одинаковые страницы.
 
@@ -481,27 +512,42 @@ def render_text(text: str, prof: Profile, opts: Options, dpi: int = PREVIEW_DPI,
     if not text.strip():
         return Rendered([], set(), dpi, f.size_mm)
     s = opts.settings(dpi)
+    if opts.a4_spread:
+        # Физический сгиб в 170 мм от края подачи. Драйвер адресует первые 297 мм.
+        start = opts.offset_x_mm
+        second = start + opts.second_start_mm
+        width = min(opts.second_start_mm, 297 - second, f.size_mm[0])
+        s = replace(s, page_size_mm=(width, f.size_mm[1]))
     layout = lay.typeset(text, prof, s)
     ink_only = for_print and opts.real_paper
-    W = f.size_mm[0]
+    W = s.page_mm[0]
     pages = list(layout.pages)
     if opts.use_spread:
         pages += [lay.Page() for _ in range(-len(pages) % 4)]  # листок — четыре страницы
+    chosen = selected_pages(page_range, len(layout.pages))
     images = []
+    placeholder = None
     for i, page in enumerate(pages):
+        if page_range and i + 1 not in chosen:
+            if opts.use_spread:
+                if placeholder is None:
+                    placeholder = Image.new("RGB", tuple(round(mm_to_px(v, dpi)) for v in s.page_mm), "white")
+                images.append(placeholder)
+            continue
         ps = s
         if opts.margin_mode == "outer" and i % 2 == 0:  # правая страница: поле справа
             page = _mirror_page(page, f.inner_mm - (f.outer_mm + 2.0))
             ps = replace(s, margin_left_mm=W - f.outer_mm)
         if for_print:
-            ps = replace(ps, solid_print=True)
+            ps = replace(ps, solid_print=True, ink_color=(0, 0, 0) if opts.black_print else ps.ink_color)
         if ink_only:
             ps = replace(ps, paper="blank")
         images.append(render_page(page, prof, ps, i))
-    r = Rendered(images, set(layout.missing), dpi, f.size_mm)
+    r = Rendered(images, set(layout.missing), dpi, s.page_mm)
     if opts.use_spread:
-        r = to_spreads(r, len(layout.pages), opts.nested)
-    if ink_only:
+        r = to_spreads(r, len(layout.pages), opts.nested, opts if opts.a4_spread else None,
+                       opts.notebook_pages, chosen if page_range else None)
+    if ink_only and not opts.a4_spread:
         # Сдвиг принтера одинаков для каждой стороны в лотке, поэтому оборот
         # сначала поворачиваем, а потом сдвигаем.
         r.images = [printer_shift(im.rotate(180) if r.is_spread and k % 2 and opts.flip_back else im, opts, dpi)
@@ -526,7 +572,8 @@ def sheet_pages(sheets: int, nested: bool) -> list[tuple[tuple[int, int], tuple[
     return out
 
 
-def to_spreads(r: Rendered, real: int | None = None, nested: bool = False) -> Rendered:
+def to_spreads(r: Rendered, real: int | None = None, nested: bool = False, feed: Options | None = None,
+               notebook_pages: int = 0, chosen: set[int] | None = None) -> Rendered:
     """Страницы тетради → стороны развёрнутых двойных листков (две страницы рядом).
 
     У каждого листка сначала печатается наружная сторона, потом листок
@@ -536,19 +583,38 @@ def to_spreads(r: Rendered, real: int | None = None, nested: bool = False) -> Re
     real = len(r.images) if real is None else real
     sheets = len(r.images) // 4
     sides, labels, blank = [], [], []
-    for i, (outer, inner) in enumerate(sheet_pages(sheets, nested)):
+    capacity = notebook_pages // 4 or sheets
+    plan = []
+    for start in range(0, sheets, capacity):
+        for outer, inner in sheet_pages(capacity, nested):
+            pair = tuple(tuple(n + 4 * start for n in side) for side in (outer, inner))
+            plan.append(pair)
+    visible = set(range(1, real + 1)) if chosen is None else chosen
+    for i, (outer, inner) in enumerate(plan):
+        if not visible.intersection(outer + inner):
+            continue
         for nums, where in ((outer, "снаружи"), (inner, "внутри")):
-            side = Image.new("RGB", (2 * w, h), (255, 255, 255))
-            side.paste(r.images[nums[0] - 1], (0, 0))
-            side.paste(r.images[nums[1] - 1], (w, 0))
+            if feed:
+                px = lambda mm: round(mm_to_px(mm, r.dpi))
+                side = Image.new("RGB", (px(297), px(210)), "white")
+                dx, dy, step = px(feed.offset_x_mm), px(feed.offset_y_mm), px(feed.second_start_mm)
+            else:
+                side = Image.new("RGB", (2*w, h), "white")
+                dx, dy, step = 0, 0, w
+            rotate = feed and feed.flip_back and where == "внутри"
+            for col, num in enumerate(reversed(nums) if rotate else nums):
+                if num > len(r.images) or (chosen is not None and num not in chosen):
+                    continue
+                im = r.images[num - 1]
+                side.paste(im.rotate(180) if rotate else im, (dx + col*step, dy))
             sides.append(side)
-            empty = min(nums) > real
-            shown = [str(x) if x <= real else "пусто" for x in nums]
+            empty = not visible.intersection(nums)
+            shown = [str(x) if x in visible else "пусто" for x in nums]
             labels.append(f"Листок {i + 1}, {where}: " + ("пусто, не печатается" if empty
                                                           else f"слева {shown[0]}, справа {shown[1]}"))
             blank.append(empty)
     W, H = r.size_mm
-    return Rendered(sides, r.missing, r.dpi, (2 * W, H), labels, blank)
+    return Rendered(sides, r.missing, r.dpi, (297., 210.) if feed else (2 * W, H), labels, blank)
 
 
 def export_pdf(text: str, prof: Profile, opts: Options, path: str | Path, dpi: int = EXPORT_DPI) -> Rendered:

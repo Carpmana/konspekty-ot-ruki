@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .template import (ARUCO_DICT, BASELINE_FROM_TOP_MM, DPI, LABEL_H_MM, MAX_PAGES, XHEIGHT_GUIDE_MM, Cell,
-                       all_pages, marker_ids, page_marker_centers_px, render_page)
+                       CUSTOM_PAGE, CUSTOM_SET, custom_cells, decode_custom, all_pages, marker_ids, page_marker_centers_px, render_page)
 from .units import A4_MM, mm_to_px
 
 CELL_INSET_MM = 1.6
@@ -414,12 +414,19 @@ def import_files(paths: list[str | Path]) -> ImportReport:
                 report.files_without_markers.append(name)
                 continue
             page, H = hit
-            if page not in pages:
+            flat = warp_to_template(img, H)
+            if page == CUSTOM_PAGE:
+                symbols = decode_custom(flat)
+                if not symbols:
+                    report.files_without_markers.append(name)
+                    continue
+                ts, cells, n_pages = CUSTOM_SET, custom_cells(symbols), 1
+            elif page in pages:
+                ts, cells, n_pages = pages[page]
+            else:
                 report.files_without_markers.append(name)
                 continue
-            ts, cells, n_pages = pages[page]
             report.pages_found.append(page)
-            flat = warp_to_template(img, H)
             template_rgb = np.array(render_page(cells, page, n_pages, ts))
             offsets = cell_offsets(flat, cells, template_rgb)
             for cell, off in zip(cells, offsets):

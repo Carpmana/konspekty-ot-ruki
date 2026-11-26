@@ -52,7 +52,7 @@ def test_options_map_to_settings():
 def test_import_scans_creates_then_extends(filled_photos, tmp_path):
     root = sv.profile_dir_for(tmp_path, "Мой почерк")
     first = sv.import_scans(root, "Мой почерк", filled_photos[:1])
-    assert first.added > 0 and first.pages_found == [0]
+    assert first.added > 0 and first.pages_found == [16]
     second = sv.import_scans(root, "Мой почерк", filled_photos[1:2])
     assert second.total_samples == first.added + second.added
     assert Profile.load(root).name == "Мой почерк"
