@@ -610,7 +610,9 @@ def to_spreads(r: Rendered, real: int | None = None, nested: bool = False, feed:
             sides.append(side)
             empty = not visible.intersection(nums)
             shown = [str(x) if x in visible else "пусто" for x in nums]
-            labels.append(f"Листок {i + 1}, {where}: " + ("пусто, не печатается" if empty
+            sheet_name = (f"Тетрадь {i // capacity + 1} · листок {i % capacity + 1}" if notebook_pages
+                          else f"Листок {i + 1}")
+            labels.append(f"{sheet_name}, {where}: " + ("пусто, не печатается" if empty
                                                           else f"слева {shown[0]}, справа {shown[1]}"))
             blank.append(empty)
     W, H = r.size_mm

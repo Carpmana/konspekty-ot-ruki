@@ -2435,7 +2435,7 @@ class MainWindow(QMainWindow):
     def _plan_subtitle(self, r: sv.Rendered, printer: QPrinter | None = None) -> str:
         if r.is_spread:
             n = len(r.sheets())
-            sides = sum(1 + (inner is not None) for _, inner in r.sheets())
+            sides = len(r.images) - sum(r.blank) if r.blank else len(r.images)
             text = (f"{n} {_plural(n, 'двойной листок', 'двойных листка', 'двойных листков')} · "
                     f"{sides} {_plural(sides, 'заход', 'захода', 'заходов')} в принтер")
         else:
@@ -2517,7 +2517,11 @@ class MainWindow(QMainWindow):
                 "Напечатается: " + r.labels[inner].split(": ", 1)[-1] + ".",
                 "flip", outer_img, "Печатать внутреннюю сторону", job([r.images[inner]]),
                 mini=small(r.images[inner])))
-        if n > 1 and self.nested_box.isChecked():
+        if r.labels[0].startswith("Тетрадь "):
+            done = "Разложите листки по тетрадям и номерам из плана печати, затем сложите каждую тетрадь."
+        elif self.range_edit.text().strip():
+            done = "Верните напечатанные листки на их места по номерам в плане."
+        elif n > 1 and self.nested_box.isChecked():
             done = ("Листок 1 снаружи, в него вложите листок 2" + (", в него листок 3" if n > 2 else "")
                     + (" и так далее" if n > 3 else "") + ". Сложите пополам — страницы пойдут по порядку.")
         elif n > 1:

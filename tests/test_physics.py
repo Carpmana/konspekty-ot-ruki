@@ -102,3 +102,10 @@ def test_pendulum_equals_has_two_separate_strokes(profile):
         assert max(x for x, _ in lower.points) < min(x for x, _ in radical.points)
         for (_, a), (_, b) in zip(upper.points, lower.points):
             assert b - a > upper.width_mm * setter.s.weight
+
+
+def test_fraction_respects_five_mm_pitch(profile):
+    settings = layout.Settings(line_pitch_mm=5, neatness=0, live_edge=0)
+    result = layout.typeset("A\n" + r"$\sqrt{\frac{v^2}{g}}$" + "\nA", profile, settings)
+    first, last = [g for p in result.pages for g in p.glyphs if g.text == "A"]
+    assert abs(last.y - first.y - 10) < 1

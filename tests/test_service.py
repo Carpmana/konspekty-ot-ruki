@@ -365,3 +365,18 @@ def test_printer_shift_left_up_to_30mm(profile):
     dx = round(sv.MAX_SHIFT_LEFT_MM * 60 / 25.4)
     assert np.array_equal(a1[:, : a0.shape[1] - dx], a0[:, dx:])
     assert (a1[:, a0.shape[1] - dx:] == 255).all()
+
+
+def test_print_range_keeps_booklet_positions():
+    from PIL import Image
+
+    pages = [Image.new("RGB", (8, 8), (k, 0, 0)) for k in range(1, 17)]
+    selected = sv.selected_pages("2, 9–10", 16)
+    r = sv.to_spreads(sv.Rendered(pages, set(), 72), nested=True, notebook_pages=8, chosen=selected)
+    assert r.blank == [True, False, False, False]
+    assert "Тетрадь 2 · листок 1" in r.labels[2]
+    assert r.images[1].getpixel((0, 0)) == (2, 0, 0)
+    assert r.images[2].getpixel((8, 0)) == (9, 0, 0)
+    assert r.images[2].getpixel((0, 0)) == (255, 255, 255)
+    with pytest.raises(ValueError):
+        sv.selected_pages("5-17", 16)
